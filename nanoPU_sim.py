@@ -583,7 +583,7 @@ class Arbiter(object):
         """
         while not Simulator.complete:
             pktgen_deq = self.pktgen_queue.get()
-            pktize_deq = self.env.process(self.pktize_module.dequeue()).
+            pktize_deq = self.env.process(self.pktize_module.dequeue())
             # wait for either the pktize module or the pktgen module to have a pkt ready
             result = yield pktize_deq | pktgen_deq
             if pktgen_deq in result:
@@ -829,7 +829,7 @@ class Simulator(object):
             Simulator.finish_time = Simulator.env.now
             Simulator.check_rx_tx_messages()
 
-    @staticmethod():
+    @staticmethod
     def check_rx_tx_messages():
         """Check that all transmitted messages were indeed received
         """
