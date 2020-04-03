@@ -9,13 +9,12 @@ import abc
 import random
 import json
 from collections import OrderedDict
-from headers import NDP
-
+from headers import *
 from sim_utils import *
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
-NIP_IP = "10.0.0.1"
+NIC_IP = "10.0.0.1"
 
 SRC_CONTEXT=0
 DST_CONTEXT=0
@@ -25,8 +24,77 @@ cmd_parser = argparse.ArgumentParser()
 cmd_parser.add_argument('--config', type=str, help='JSON config file to control the simulations', required=True)
 
 ####
-# Helper functions
+# Helper functions / classes
 ####
+
+class Logger(object):
+    debug = True
+    def __init__(self):
+        self.env = Simulator.env
+
+    @staticmethod
+    def init_params():
+        pass
+
+    def log(self, s):
+        if Logger.debug:
+            print '{}: {}'.format(self.env.now, s)
+
+def DistGenerator(varname):
+    dist = Simulator.config[varname].next()
+    # initialize variable params
+    kwargs = {}
+    if dist == 'uniform':
+        kwargs['min'] = Simulator.config['{}_min'.format(varname)].next()
+        kwargs['max'] = Simulator.config['{}_max'.format(varname)].next()
+    elif dist == 'normal':
+        kwargs['mean']   = Simulator.config['{}_mean'.format(varname)].next()
+        kwargs['stddev'] = Simulator.config['{}_stddev'.format(varname)].next()
+    elif dist == 'poisson':
+        kwargs['lambda'] = Simulator.config['{}_lambda'.format(varname)].next()
+    elif dist == 'lognormal':
+        kwargs['mean'] = Simulator.config['{}_mean'.format(varname)].next()
+        kwargs['sigma'] = Simulator.config['{}_sigma'.format(varname)].next()
+    elif dist == 'exponential':
+        kwargs['lambda'] = Simulator.config['{}_lambda'.format(varname)].next()
+    elif dist == 'fixed':
+        kwargs['value'] = Simulator.config['{}_value'.format(varname)].next()
+    elif dist == 'bimodal':
+        kwargs['lower_mean']    = Simulator.config['{}_lower_mean'.format(varname)].next()
+        kwargs['lower_stddev']  = Simulator.config['{}_lower_stddev'.format(varname)].next()
+        kwargs['lower_samples'] = Simulator.config['{}_lower_samples'.format(varname)].next()
+        kwargs['upper_mean']    = Simulator.config['{}_upper_mean'.format(varname)].next()
+        kwargs['upper_stddev']  = Simulator.config['{}_upper_stddev'.format(varname)].next()
+        kwargs['upper_samples'] = Simulator.config['{}_upper_samples'.format(varname)].next()
+    elif dist == 'custom':
+        kwargs['csv'] = Simulator.config['{}_csv'.format(varname)].next()
+
+    if dist == 'bimodal':
+        bimodal_samples = map(int, list(np.random.normal(kwargs['lower_mean'], kwargs['lower_stddev'], kwargs['lower_samples']))
+                                   + list(np.random.normal(kwargs['upper_mean'], kwargs['upper_stddev'], kwargs['upper_samples'])))
+    elif dist == 'custom':
+        custom_samples = pd.read_csv(kwargs['csv'])['samples']
+
+    while True:
+        if dist == 'uniform':
+            yield random.randint(kwargs['min'], kwargs['max'])
+        elif dist == 'normal':
+            yield int(np.random.normal(kwargs['mean'], kwargs['stddev']))
+        elif dist == 'poisson':
+            yield np.random.poisson(kwargs['lambda']) 
+        elif dist == 'lognormal':
+            yield int(np.random.lognormal(kwargs['mean'], kwargs['sigma']))
+        elif dist == 'exponential':
+            yield int(np.random.exponential(kwargs['lambda']))
+        elif dist == 'fixed':
+            yield kwargs['value']
+        elif dist == 'bimodal':
+            yield random.choice(bimodal_samples)
+        elif dist == 'custom':
+            yield random.choice(custom_samples)
+        else:
+            print 'ERROR: Unsupported distrbution: {}'.format(dist)
+            sys.exit(1)
 
 def compute_num_pkts(msg_len):
     return msg_len/Simulator.max_pkt_len if (msg_len % Simulator.max_pkt_len == 0) else msg_len/Simulator.max_pkt_len + 1
@@ -345,6 +413,7 @@ class Packetize(object):
                 self.delivered[tx_msg_id] = 0
                 self.credit[tx_msg_id] = Simulator.rtt_pkts
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
+                self.max_tx_pkt_offset[tx_msg_id] = 0
                 # schedule a timer for this msg
                 self.scheduleTimerEvent(tx_msg_id, 0)
                 # make this message active
@@ -355,7 +424,7 @@ class Packetize(object):
     def enq_active_messages_fifo(self, tx_msg_id):
         # make sure msg is not already active
         if self.active_messages_bitmap & (1<<tx_msg_id) == 0:
-            self.log('Enqueueing msg {} into active_messages_fifo')
+            self.log('Enqueueing msg {} into active_messages_fifo'.format(tx_msg_id))
             self.active_messages_fifo.put(tx_msg_id)
             # mark as active (flip bit)
             self.active_messages_bitmap = self.active_messages_bitmap ^ (1<<tx_msg_id)
@@ -375,7 +444,6 @@ class Packetize(object):
             self.log('dequeue() interrupted')
             self.env.exit(None)
 
-        self.log('Transmiting pkt from msg {}'.format(tx_msg_id))
         # mark msg as inactive (flip bit)
         self.active_messages_bitmap = self.active_messages_bitmap ^ (1<<tx_msg_id)
         # lookup which pkts of this msg need to be transmitted
