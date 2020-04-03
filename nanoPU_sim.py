@@ -180,7 +180,7 @@ class IngressPipe(object):
                 # fire event to generate control pkt(s)
                 self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip, dst_context, src_context, tx_msg_id, msg_len, pkt_offset, pull_offset)
             else:
-                self.log('Processing control pkt')
+                self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # control pkt for msg being transmitted
                 # defaults
                 tx_msg_id = pkt[NDP].tx_msg_id
@@ -188,11 +188,11 @@ class IngressPipe(object):
                 msg_len = pkt[NDP].msg_len
                 if pkt[NDP].flags.ACK or pkt[NDP].flags.NACK:
                     was_delivered = pkt[NDP].flags.ACK
-                    self.log('msg: {}, pkt: {}, was_delivered: {}'.format(tx_msg_id, pkt_offset, was_delivered))
+                    self.log('tx_msg_id: {}, pkt: {}, was_delivered: {}'.format(tx_msg_id, pkt_offset, was_delivered))
                     # fire event to update state in packetization module
                     self.deliveredEvent(tx_msg_id, pkt_offset, msg_len, was_delivered)
                 if pkt[NDP].flags.PULL:
-                    self.log('Received PULL pkt for msg {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
+                    self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
                     # increase credit
                     # TODO: this is not how NDP updates credit, but just to get something running ...
                     credit = pkt[NDP].pkt_offset
@@ -311,6 +311,8 @@ class Packetize(object):
         self.app_header = {}
         # state to keep track of max pkt offset transmitted so far
         self.max_tx_pkt_offset = {}
+        # state to track # of time a msg times out {tx_msg_id => timeout_count}
+        self.timeout_count = {}
 
         self.env.process(self.start())
 
@@ -332,17 +334,21 @@ class Packetize(object):
         self.log("Processing deliveredEvent for msg {}".format(tx_msg_id))
         if (tx_msg_id in self.delivered) and (tx_msg_id in self.toBtx):
             if was_delivered:
-                self.log("Marking pkt as delivered")
+                self.log("Marking pkt {} as delivered".format(pkt_offset))
                 delivered_bitmap = self.delivered[tx_msg_id]
                 self.delivered[tx_msg_id] = delivered_bitmap | (1<<pkt_offset)
                 # check if the whole message has been delivered
                 num_pkts = compute_num_pkts(msg_len)
-                if delivered_bitmap == (1<<num_pkts)-1:
+                if self.delivered[tx_msg_id] == (1<<num_pkts)-1:
                     self.log("The whole msg was delivered!")
                     # cancel the timer for this msg
                     self.cancelTimerEvent(tx_msg_id)
                     # free the tx_msg_id
-                    self.tx_msg_id_freelist.append(tx_msg_id)                
+                    self.tx_msg_id_freelist.append(tx_msg_id)
+                    # message_cnt increases when message is fully ACKed
+                    Simulator.message_cnt += 1
+                    # check if simulation is complete
+                    Simulator.check_done()
             else:
                 self.log("Marking the pkt for retransmission")
                 toBtx_bitmap = self.toBtx[tx_msg_id]
@@ -367,18 +373,28 @@ class Packetize(object):
 
     def timeoutEvent(self, tx_msg_id, rtx_offset):
         self.log('Processing timeoutEvent for msg {}'.format(tx_msg_id))
-        # Mark all undelivered the pkts before the specified offset for retransmission
-        delivered_bitmap = self.delivered[tx_msg_id]
-        rtx_pkts_mask = (1<<rtx_offset)-1
-        rtx_pkts = ~delivered_bitmap & rtx_pkts_mask
-        self.log('Pkts to retransmit: {:b}'.format(rtx_pkts))
-        toBtx_bitmap = self.toBtx[tx_msg_id]
-        self.toBtx[tx_msg_id] = toBtx_bitmap | rtx_pkts
-        # reschedule timer for this msg
-        self.rescheduleTimerEvent(tx_msg_id, self.max_tx_pkt_offset[tx_msg_id])
-        if rtx_pkts != 0:
-            # make the message active
-            self.enq_active_messages_fifo(tx_msg_id)
+        # increase timeout counter
+        self.timeout_count[tx_msg_id] += 1
+        if self.timeout_count[tx_msg_id] >= Simulator.max_num_timeouts:
+            self.log('ERROR: tx_msg_id {} expired'.format(tx_msg_id))
+            # free the tx_msg_id
+            self.tx_msg_id_freelist.append(tx_msg_id)
+            Simulator.message_cnt += 1
+            # check if simulation is complete
+            Simulator.check_done()
+        else:
+            # Mark all undelivered the pkts before the specified offset for retransmission
+            delivered_bitmap = self.delivered[tx_msg_id]
+            rtx_pkts_mask = (1<<rtx_offset)-1
+            rtx_pkts = ~delivered_bitmap & rtx_pkts_mask
+            self.log('Pkts to retransmit: {:b}'.format(rtx_pkts))
+            toBtx_bitmap = self.toBtx[tx_msg_id]
+            self.toBtx[tx_msg_id] = toBtx_bitmap | rtx_pkts
+            # reschedule timer for this msg
+            self.rescheduleTimerEvent(tx_msg_id, self.max_tx_pkt_offset[tx_msg_id])
+            if rtx_pkts != 0:
+                # make the message active
+                self.enq_active_messages_fifo(tx_msg_id)
 
     def init_scheduleTimerEvent(self, scheduleTimerEvent):
         self.scheduleTimerEvent = scheduleTimerEvent
@@ -414,6 +430,7 @@ class Packetize(object):
                 self.credit[tx_msg_id] = Simulator.rtt_pkts
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
                 self.max_tx_pkt_offset[tx_msg_id] = 0
+                self.timeout_count[tx_msg_id] = 0
                 # schedule a timer for this msg
                 self.scheduleTimerEvent(tx_msg_id, 0)
                 # make this message active
@@ -550,21 +567,29 @@ class PktGen(object):
         self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
-        ndp = NDP(src_context=src_context,
-                  dst_context=dst_context,
-                  tx_msg_id=tx_msg_id,
-                  msg_len=msg_len)
         if genACK:
-            ndp.flags = "ACK"
-            ndp.pkt_offset = pkt_offset
+            ndp = NDP(flags="ACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
             self.arbiter_queue.put((meta, ndp))
         if genNACK:
-            ndp.flags = "NACK"
-            ndp.pkt_offset = pkt_offset
+            ndp = NDP(flags="NACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
             self.arbiter_queue.put((meta, ndp))
         if genPULL:
-            ndp.flags = "PULL"
-            ndp.pkt_offset = pull_offset
+            ndp = NDP(flags="PULL",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pull_offset)
             self.pacer_queue.put((meta, ndp))
 
     def start_pacer(self):
@@ -622,7 +647,7 @@ class EgressPipe(object):
                                  msg_len=meta.msg_len,
                                  pkt_offset=meta.pkt_offset)/pkt
             else:
-                self.log('Processing control pkt')
+                self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
             # send pkt into network
@@ -702,9 +727,6 @@ class CPU(object):
             Simulator.rx_msgs.append(msg[App].payload) # no App header
             # update stats
             Simulator.message_stats['completion_times'].append(self.env.now - msg.send_time) # ns
-            Simulator.message_cnt += 1
-            # check if simulation is complete
-            Simulator.check_done()
 
     def start_tx(self):
         """Start generating messages"""
@@ -771,7 +793,7 @@ class Network(object):
 
     def forward_ctrl(self, pkt):
         delay = Network.ctrl_pkt_delay_dist.next()
-        self.log('Forwarding control pkt with delay {}'.format(delay))
+        self.log('Forwarding control pkt ({}) with delay {}'.format(pkt[NDP].flags, delay))
         yield self.env.timeout(delay)
         self.tor_queue.put(NetworkPkt(pkt, priority=0))
 
@@ -780,7 +802,7 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt')
+            self.log('Received pkt: {}'.format(pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
                 if random.random() < Network.data_pkt_trim_prob:
                     self.log('Trimming data pkt')
@@ -798,8 +820,8 @@ class Network(object):
         """Start transmitting pkts from the TOR queue to the TX queue"""
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
-            self.log('Transmitting pkt to IngressPipe')
             pkt = net_pkt.pkt
+            self.log('Transmitting pkt ({}) to IngressPipe'.format(pkt[NDP].flags))
             self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
@@ -825,6 +847,7 @@ class Simulator(object):
         Simulator.max_message_size = Simulator.config['max_message_size'].next()
         Simulator.rx_link_rate = Simulator.config['rx_link_rate'].next()
         Simulator.rtt_pkts = Simulator.config['rtt_pkts'].next()
+        Simulator.max_num_timeouts = Simulator.config['max_num_timeouts'].next()
 
         # initialize message_stats
         Simulator.message_stats = {'message_sizes':[],
