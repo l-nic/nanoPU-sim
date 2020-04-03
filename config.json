@@ -6,7 +6,7 @@
   "min_message_size": 10,
   "max_message_size": 1000,
   "message_size": "fixed",
-  "message_size_value": 10,
+  "message_size_value": 110,
   "rx_link_rate": 100,
   "rtt_pkts": 5,
   "reassemble_max_messages": 100,

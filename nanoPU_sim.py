@@ -195,7 +195,7 @@ class IngressPipe(object):
                     self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
                     # increase credit
                     # TODO: this is not how NDP updates credit, but just to get something running ...
-                    credit = pkt[NDP].pkt_offset
+                    credit = pkt[NDP].pkt_offset+1
                     self.creditEvent(tx_msg_id, credit)
 
 class ReassembleMeta:
@@ -331,7 +331,7 @@ class Packetize(object):
     def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len, was_delivered):
         """Mark a packet as either having been delivered or dropped
         """
-        self.log("Processing deliveredEvent for msg {}".format(tx_msg_id))
+        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id, pkt_offset))
         if (tx_msg_id in self.delivered) and (tx_msg_id in self.toBtx):
             if was_delivered:
                 self.log("Marking pkt {} as delivered".format(pkt_offset))
@@ -363,7 +363,8 @@ class Packetize(object):
         self.log('Processing creditEvent for msg {}, credit = {}'.format(tx_msg_id, credit))
         # set the credit for the specified msg
         if (tx_msg_id in self.credit):
-            if credit > self.credit[tx_msg_id]:
+            # only increase credit if there are more pkts to transmit
+            if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
                 self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
                 self.credit[tx_msg_id] = credit
                 # make the message active
@@ -458,7 +459,6 @@ class Packetize(object):
             tx_msg_id = yield wait_active_msg_event
         except simpy.Interrupt as i:
             wait_active_msg_event.cancel()
-            self.log('dequeue() interrupted')
             self.env.exit(None)
 
         # mark msg as inactive (flip bit)
