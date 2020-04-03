@@ -747,7 +747,7 @@ class CPU(object):
             # send message
             self.tx_queue.put(msg)
             # compute the delay for this message based on the rate and message size
-            delay = (message_size*8)/float(CPU.tx_rate) # ns
+            delay = (message_size*8)/CPU.tx_rate # ns
             yield self.env.timeout(delay)
 
 class NetworkPkt(object):
@@ -930,11 +930,13 @@ class Simulator(object):
             else:
                 print "ERROR: msg was transmitted but not received"
                 msg.show()
+                hexdump(msg)
         if len(Simulator.rx_msgs) > 0:
             print "ERROR: msgs were received but not transmitted:"
             for i in range(len(Simulator.rx_msgs)):
                 print "msg {}:".format(i)
                 Simulator.rx_msgs[i].show()
+                hexdump(Simulator.rx_msgs[i])
         else:
             print "SUCCESS: all msgs were successfully delivered!"
 
