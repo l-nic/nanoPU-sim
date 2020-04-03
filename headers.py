@@ -7,7 +7,7 @@ NDP_PROTO = 0x99
 class NDP(Packet):
     name = "NDP"
     fields_desc = [
-        FlagsField("flags", 0, 8, ["DATA", "ACK", "NACK", "PULL", "F0", "F1", "F2", "F3"]),
+        FlagsField("flags", 0, 8, ["DATA", "ACK", "NACK", "PULL", "CHOP", "F1", "F2", "F3"]),
         ShortField("src_context", 0),
         ShortField("dst_context", 0),
         ShortField("tx_msg_id", 0),
@@ -20,7 +20,7 @@ class App(Packet):
     name = "App"
     fields_desc = [
         IPField("ipv4_addr", "0.0.0.0"),
-        ShortField("lnic_addr", 0),
+        ShortField("context_id", 0),
         ShortField("msg_len", 0)
     ]
 

@@ -7,7 +7,7 @@ import json
 from nanoPU_sim import Simulator
 
 class Logger(object):
-    debug = False
+    debug = True
     def __init__(self):
         self.env = Simulator.env
 
