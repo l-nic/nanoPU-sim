@@ -1,22 +1,22 @@
 {
   "out_dir": "out",
-  "num_messages": 2,
+  "num_messages": 1,
   "message_size": "fixed",
   "message_size_value": 10,
-  "rtt_pkts": 1,
+  "rtt_pkts": 10,
+  "data_pkt_trim_prob": [0],
   "max_pkt_len": 100,
   "min_message_size": 10,
-  "max_message_size": 1000,
+  "max_message_size": 10000,
   "rx_link_rate": 100,
   "reassemble_max_messages": 100,
   "packetize_max_messages": 100,
   "sample_period": 500,
   "timeout_ns": 10000,
   "max_num_timeouts": 5,
-  "cpu_tx_rate": [100],
-  "data_pkt_trim_prob": 0,
+  "cpu_tx_rate": 100,
   "ctrl_pkt_delay": "fixed",
   "ctrl_pkt_delay_value": 1000,
   "data_pkt_delay": "fixed",
-  "data_pkt_delay_value": 2000
+  "data_pkt_delay_value": 1000
 }

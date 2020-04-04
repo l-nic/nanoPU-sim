@@ -374,8 +374,6 @@ class Packetize(object):
 
     def timeoutEvent(self, tx_msg_id, rtx_offset):
         self.log('Processing timeoutEvent for msg {}'.format(tx_msg_id))
-        # increase timeout counter
-        self.timeout_count[tx_msg_id] += 1
         if self.timeout_count[tx_msg_id] >= Simulator.max_num_timeouts:
             self.log('ERROR: tx_msg_id {} expired'.format(tx_msg_id))
             # free the tx_msg_id
@@ -396,6 +394,8 @@ class Packetize(object):
             if rtx_pkts != 0:
                 # make the message active
                 self.enq_active_messages_fifo(tx_msg_id)
+                # increase timeout counter
+                self.timeout_count[tx_msg_id] += 1
 
     def init_scheduleTimerEvent(self, scheduleTimerEvent):
         self.scheduleTimerEvent = scheduleTimerEvent
