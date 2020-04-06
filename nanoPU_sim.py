@@ -150,6 +150,12 @@ class IngressPipe(object):
         while not Simulator.complete:
             # wait for a pkt from the network
             pkt = yield self.net_queue.get()
+
+            # defaults
+            tx_msg_id = pkt[NDP].tx_msg_id
+            pkt_offset = pkt[NDP].pkt_offset
+            msg_len = pkt[NDP].msg_len
+
             if pkt[NDP].flags.DATA:
                 self.log('Processing data pkt')
                 # defaults for generating control pkts
@@ -159,9 +165,7 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                tx_msg_id = pkt[NDP].tx_msg_id
-                msg_len = pkt[NDP].msg_len
-                pkt_offset = pkt[NDP].pkt_offset
+
                 pull_offset = 0
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
@@ -171,21 +175,31 @@ class IngressPipe(object):
                     # process DATA pkt
                     genACK = True
                     genPULL = True
-                    rx_msg_id = self.getRxMsgID(pkt[IP].src, pkt[NDP].src_context, pkt[NDP].tx_msg_id, pkt[NDP].msg_len)
+                    rx_msg_id = self.getRxMsgID(pkt[IP].src,
+                                                pkt[NDP].src_context,
+                                                pkt[NDP].tx_msg_id,
+                                                pkt[NDP].msg_len)
                     # compute pull_offset
-                    # TODO: this is not how NDP computes pull_offset, but just to get something running ...
+                    # TODO: this is not how NDP computes pull_offset, but just
+                    #       to get something running ...
+                    #       NDP needs to be able to read msg state to decide
+                    #       on the pull offset!
                     pull_offset = pkt[NDP].pkt_offset + Simulator.rtt_pkts
-                    data = (ReassembleMeta(rx_msg_id, pkt[IP].src, pkt[NDP].src_context, pkt[NDP].tx_msg_id, pkt[NDP].msg_len, pkt[NDP].pkt_offset), pkt[NDP].payload)
+                    data = (ReassembleMeta(rx_msg_id,
+                                           pkt[IP].src,
+                                           pkt[NDP].src_context,
+                                           pkt[NDP].tx_msg_id,
+                                           pkt[NDP].msg_len,
+                                           pkt[NDP].pkt_offset),
+                            pkt[NDP].payload)
                     self.assemble_queue.put(data)
                 # fire event to generate control pkt(s)
-                self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip, dst_context, src_context, tx_msg_id, msg_len, pkt_offset, pull_offset)
+                self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip,
+                                  dst_context, src_context, tx_msg_id,
+                                  msg_len, pkt_offset, pull_offset)
             else:
                 self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # control pkt for msg being transmitted
-                # defaults
-                tx_msg_id = pkt[NDP].tx_msg_id
-                pkt_offset = pkt[NDP].pkt_offset
-                msg_len = pkt[NDP].msg_len
                 if pkt[NDP].flags.ACK or pkt[NDP].flags.NACK:
                     was_delivered = pkt[NDP].flags.ACK
                     self.log('tx_msg_id: {}, pkt: {}, was_delivered: {}'.format(tx_msg_id, pkt_offset, was_delivered))
@@ -194,7 +208,12 @@ class IngressPipe(object):
                 if pkt[NDP].flags.PULL:
                     self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
                     # increase credit
-                    # TODO: this is not how NDP updates credit, but just to get something running ...
+                    # TODO: this is not how NDP updates credit, but just to get
+                    #       something running ...
+                    # TODO: NDP needs to be able to compare the current pull
+                    #       offset and if pkt[NDP].pkt_offset. If the pkt_offset
+                    #       is greater than the current pull_offset, sets the
+                    #       pull_offset as the pkt_offset.
                     credit = pkt[NDP].pkt_offset+1
                     self.creditEvent(tx_msg_id, credit)
 
@@ -264,7 +283,8 @@ class Reassemble(object):
         while not Simulator.complete:
             # wait for a data pkt to arrive: (AssembleMeta, data_pkt)
             (meta, pkt) = yield self.assemble_queue.get()
-            self.log('Processing pkt {} for msg {}'.format(meta.pkt_offset, meta.rx_msg_id))
+            self.log('Processing pkt {} for msg {}'.format(meta.pkt_offset,
+                                                           meta.rx_msg_id))
             # record pkt data in buffer
             self.buffers[meta.rx_msg_id][meta.pkt_offset] = str(pkt)
             # mark the pkt as received
@@ -331,7 +351,8 @@ class Packetize(object):
     def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len, was_delivered):
         """Mark a packet as either having been delivered or dropped
         """
-        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id, pkt_offset))
+        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id,
+                                                                       pkt_offset))
         if (tx_msg_id in self.delivered) and (tx_msg_id in self.toBtx):
             if was_delivered:
                 self.log("Marking pkt {} as delivered".format(pkt_offset))
@@ -358,12 +379,22 @@ class Packetize(object):
         else:
             self.log("ERROR: deliveredEvent was triggered for unknown tx_msg_id: {}".format(tx_msg_id))
 
-    # TODO(sibanez): what is the best way to expose the credit state to the ingress pipeline?
+    # TODO(sibanez): what is the best way to expose the credit state to the
+    #                ingress pipeline?
+    # TODO: The ingress pipeline will need to know the current credit value
+    #       before setting/incrementing/changing it.
+    #       Additionally, the ingress pipeline will need to know other state
+    #       (ie. delivered_bitmap) to calculate the new credit value. We ideally
+    #       don't want this to be fixed function, so the state should be readable,
+    #       by the ingress pipeline.
     def creditEvent(self, tx_msg_id, credit):
         self.log('Processing creditEvent for msg {}, credit = {}'.format(tx_msg_id, credit))
         # set the credit for the specified msg
         if (tx_msg_id in self.credit):
             # only increase credit if there are more pkts to transmit
+            # TODO: Credit (pulloffset for NDP) should be increased even if
+            #       there is no packet to transmit at the moment because there
+            #       might be packets in the future.
             if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
                 self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
                 self.credit[tx_msg_id] = credit
@@ -598,6 +629,8 @@ class PktGen(object):
         while not Simulator.complete:
             data = yield self.pacer_queue.get()
             # For now, assume that each PULL pkt pulls one max size pkt
+            # TODO: Pacing should be done according to the packet size of the
+            #       message that is being pulled (ie, MTU)
             delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
             yield self.env.timeout(delay)
             self.log('Pacer is releasing a PULL pkt')
@@ -677,7 +710,8 @@ class Arbiter(object):
         while not Simulator.complete:
             pktgen_deq = self.pktgen_queue.get()
             pktize_deq = self.env.process(self.pktize_module.dequeue())
-            # wait for either the pktize module or the pktgen module to have a pkt ready
+            # wait for either the pktize module or the pktgen module to
+            # have a pkt ready
             result = yield pktize_deq | pktgen_deq
             if pktgen_deq in result:
                 self.log('Scheduling control pkt')
@@ -685,6 +719,7 @@ class Arbiter(object):
                 self.egress_queue.put(data)
             else:
                 pktgen_deq.cancel()
+
             if pktize_deq in result:
                 self.log('Scheduling data pkt')
                 data = result[pktize_deq]
@@ -865,6 +900,7 @@ class Simulator(object):
         self.logger = Logger()
 
         # create queues
+        # TODO: Add capacity to those queues for realistic simulations
         ingress_net_queue = simpy.Store(self.env)
         egress_net_queue = simpy.Store(self.env)
         assemble_queue = simpy.Store(self.env)
@@ -982,7 +1018,8 @@ def run_sim(cmdline_args, *args):
             Arbiter.init_params()
             CPU.init_params()
             Network.init_params()
-            Simulator.out_run_dir = os.path.join(Simulator.out_dir, 'run-{}'.format(run_cnt))
+            Simulator.out_run_dir = os.path.join(Simulator.out_dir,
+                                                 'run-{}'.format(run_cnt))
             run_cnt += 1
             env = simpy.Environment()
             Simulator.env = env
