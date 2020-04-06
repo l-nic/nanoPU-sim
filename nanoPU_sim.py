@@ -166,11 +166,17 @@ class IngressPipe(object):
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
 
-                pull_offset = 0
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
                     # send NACK
                     genNACK = True
+                    genPULL = True
+
+                    # TODO: this is not how NDP computes pull_offset, but just
+                    #       to get something running ...
+                    #       NDP would use the current pull offset state for this
+                    #       message!
+                    pull_offset = pkt[NDP].pkt_offset
                 else:
                     # process DATA pkt
                     genACK = True
@@ -594,7 +600,8 @@ class PktGen(object):
     def log(self, msg):
         self.logger.log('PktGen: {}'.format(msg))
 
-    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context, src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
+    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context,
+                     src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
         self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
