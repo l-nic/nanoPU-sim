@@ -28,16 +28,16 @@ cmd_parser.add_argument('--config', type=str, help='JSON config file to control 
 ####
 
 class Logger(object):
-    debug = True
-    def __init__(self):
+    def __init__(self, debug=True):
         self.env = Simulator.env
+        self.debug = debug
 
     @staticmethod
     def init_params():
         pass
 
     def log(self, s):
-        if Logger.debug:
+        if self.debug:
             print '{}: {}'.format(self.env.now, s)
 
 def DistGenerator(varname):
@@ -81,7 +81,7 @@ def DistGenerator(varname):
         elif dist == 'normal':
             yield int(np.random.normal(kwargs['mean'], kwargs['stddev']))
         elif dist == 'poisson':
-            yield np.random.poisson(kwargs['lambda']) 
+            yield np.random.poisson(kwargs['lambda'])
         elif dist == 'lognormal':
             yield int(np.random.lognormal(kwargs['mean'], kwargs['sigma']))
         elif dist == 'exponential':
@@ -116,7 +116,7 @@ class IngressPipe(object):
     """P4 programmable ingress pipeline"""
     def __init__(self, net_queue, assemble_queue):
         self.env = Simulator.env
-        self.logger = Logger() 
+        self.logger = Logger()
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
         self.env.process(self.start())
@@ -999,4 +999,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
