@@ -200,6 +200,11 @@ class IngressPipe(object):
                             pkt[NDP].payload)
                     self.assemble_queue.put(data)
                 # fire event to generate control pkt(s)
+                # TODO: Instead of providing some arguments to the packet
+                #       generator, we should provide the exact transport layer
+                #       header because we want the fixed function packet generator
+                #       to be able to generate packets for any transport protocol
+                #       that programmer deploys.
                 self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip,
                                   dst_context, src_context, tx_msg_id,
                                   msg_len, pkt_offset, pull_offset)
