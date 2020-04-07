@@ -216,8 +216,8 @@ class IngressPipe(object):
 
                 # compute pull_offset with a PRAW extern
                 if isNewMsg:
-                    self.credit[rx_msg_id] = Simulator.rtt_pkts
-                    pull_offset = self.credit[rx_msg_id] + pull_offset_diff
+                    self.credit[rx_msg_id] = Simulator.rtt_pkts + pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
                 else:
                     self.credit[rx_msg_id] += pull_offset_diff
                     pull_offset = self.credit[rx_msg_id]
