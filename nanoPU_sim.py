@@ -99,7 +99,7 @@ def DistGenerator(varname):
 def compute_num_pkts(msg_len):
     return msg_len/Simulator.max_pkt_len if (msg_len % Simulator.max_pkt_len == 0) else msg_len/Simulator.max_pkt_len + 1
 
-def priority_encoder(bitmap):
+def find_first_one(bitmap):
     """Find the first set bit in the provided bitmap
     """
     if bitmap == 0:
@@ -107,6 +107,13 @@ def priority_encoder(bitmap):
     assert bitmap > 0, "ERROR: bitmap must be positive"
     bits = bin(bitmap)[2:][::-1]
     return bits.find('1')
+
+def priority_encoder(bitmap):
+    """Select an index based on the deployed priority selection policies
+    """
+    first_one = True
+    if first_one:
+        return find_first_one(bitmap)
 
 #####
 # Architecture Elements
@@ -165,32 +172,25 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
+                rx_msg_id, ack_no = self.getRxMsgID(pkt[IP].src,
+                                                    pkt[NDP].src_context,
+                                                    pkt[NDP].tx_msg_id,
+                                                    pkt[NDP].msg_len)
 
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
-                    # send NACK
+                    # send NACK and PULL
                     genNACK = True
                     genPULL = True
 
-                    # TODO: this is not how NDP computes pull_offset, but just
-                    #       to get something running ...
-                    #       NDP would use the current pull offset state for this
-                    #       message!
-                    pull_offset = pkt[NDP].pkt_offset
+                    pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
                     genPULL = True
-                    rx_msg_id = self.getRxMsgID(pkt[IP].src,
-                                                pkt[NDP].src_context,
-                                                pkt[NDP].tx_msg_id,
-                                                pkt[NDP].msg_len)
+
                     # compute pull_offset
-                    # TODO: this is not how NDP computes pull_offset, but just
-                    #       to get something running ...
-                    #       NDP needs to be able to read msg state to decide
-                    #       on the pull offset!
-                    pull_offset = pkt[NDP].pkt_offset + Simulator.rtt_pkts
+                    pull_offset = ack_no + Simulator.rtt_pkts
                     data = (ReassembleMeta(rx_msg_id,
                                            pkt[IP].src,
                                            pkt[NDP].src_context,
@@ -272,8 +272,14 @@ class Reassemble(object):
         self.log('Processing getRxMsgID extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
-            self.log('Found rx_msg_id: {}'.format(self.rx_msg_id_table[key]))
-            return self.rx_msg_id_table[key]
+            rx_msg_id = self.rx_msg_id_table[key]
+            self.log('Found rx_msg_id: {}'.format(rx_msg_id))
+            # compute the beginning of the inflight window
+            ack_no = find_first_one(~self.received_bitmap[rx_msg_id])
+            if ack_no is None:
+                self.log('Message {} has already been fully received'.format(rx_msg_id))
+                ack_no = compute_num_pkts(msg_len) + 1
+            return rx_msg_id, ack_no
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -284,7 +290,8 @@ class Reassemble(object):
             num_pkts = compute_num_pkts(msg_len)
             self.buffers[rx_msg_id] = ["" for i in range(num_pkts)]
             self.received_bitmap[rx_msg_id] = 0
-            return rx_msg_id
+            ack_no = 0
+            return rx_msg_id, ack_no
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
         return -1
 
@@ -299,7 +306,7 @@ class Reassemble(object):
             # record pkt data in buffer
             self.buffers[meta.rx_msg_id][meta.pkt_offset] = str(pkt)
             # mark the pkt as received
-            # NOTE: received_bitmap must have 2 write ports
+            # NOTE: received_bitmap must have 2 write ports: here and in getRxMsgID()
             self.received_bitmap[meta.rx_msg_id] = self.received_bitmap[meta.rx_msg_id] | (1 << meta.pkt_offset)
             # check if all pkts have been received
             num_pkts = compute_num_pkts(meta.msg_len)
@@ -322,7 +329,7 @@ class Packetize(object):
         self.cpu_queue = cpu_queue
 
         ####
-        # initialize state
+        # initialize state for tx messages
         ####
         # freelist of tx msg ids
         self.tx_msg_id_freelist = [i for i in range(Packetize.max_messages)]
@@ -346,7 +353,6 @@ class Packetize(object):
         self.timeout_count = {}
 
         self.env.process(self.start())
-
 
     @staticmethod
     def init_params():
