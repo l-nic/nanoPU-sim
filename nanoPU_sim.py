@@ -16,10 +16,11 @@ import math
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
-NIC_IP = "10.0.0.1"
+NIC_IP_TX = "10.0.0.1"
+NIC_IP_RX = "10.0.0.2"
 
 SRC_CONTEXT=0
-DST_CONTEXT=0
+DST_CONTEXT=99
 
 # default cmdline args
 cmd_parser = argparse.ArgumentParser()
@@ -128,6 +129,10 @@ class IngressPipe(object):
         self.logger = Logger()
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
+
+        # Programmer-defined state to track credit for each message {rx_msg_id => credit}
+        self.credit = {} #Credit is the Pull Offset in NDP
+
         self.env.process(self.start())
 
     @staticmethod
@@ -174,25 +179,21 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                rx_msg_id, ack_no = self.getRxMsgID(pkt[IP].src,
-                                                    pkt[NDP].src_context,
-                                                    pkt[NDP].tx_msg_id,
-                                                    pkt[NDP].msg_len)
+                rx_msg_id, ack_no, isNewMsg = self.getRxMsgID(pkt[IP].src,
+                                                              pkt[NDP].src_context,
+                                                              pkt[NDP].tx_msg_id,
+                                                              pkt[NDP].msg_len)
                 # NOTE: ack_no is the current acknowledgement number before
                 #       processing this incoming data packet because this
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
-
+                pull_offset_diff = 0
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
                     # send NACK and PULL
                     genNACK = True
                     genPULL = True
 
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + 1
-                    else:
-                        pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
@@ -200,12 +201,6 @@ class IngressPipe(object):
                     #       last packet of the msg
                     #       (ie, if ack_no > compute_num_pkts(msg_len))
                     genPULL = True
-
-                    # compute pull_offset
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + Simulator.rtt_pkts + 1
-                    else:
-                        pull_offset = ack_no + Simulator.rtt_pkts
 
                     data = (ReassembleMeta(rx_msg_id,
                                            pkt[IP].src,
@@ -215,6 +210,16 @@ class IngressPipe(object):
                                            pkt[NDP].pkt_offset),
                             pkt[NDP].payload)
                     self.assemble_queue.put(data)
+                    pull_offset_diff = 1
+
+                # compute pull_offset with a PRAW extern
+                if isNewMsg:
+                    self.credit[rx_msg_id] = Simulator.rtt_pkts + pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
+                else:
+                    self.credit[rx_msg_id] += pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
+
                 # fire event to generate control pkt(s)
                 # TODO: Instead of providing some arguments to the packet
                 #       generator, we should provide the exact transport layer
@@ -280,6 +285,7 @@ class Reassemble(object):
         """Obtain the rx_msg_id for the indicated message, or try to assign one.
         """
         key = (src_ip, src_context, tx_msg_id)
+        isNewMsg = False
         self.log('Processing getRxMsgID extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
@@ -290,7 +296,7 @@ class Reassemble(object):
             if ack_no is None:
                 self.log('Message {} has already been fully received'.format(rx_msg_id))
                 ack_no = compute_num_pkts(msg_len) + 1
-            return rx_msg_id, ack_no
+            return rx_msg_id, ack_no, isNewMsg
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -302,9 +308,10 @@ class Reassemble(object):
             self.buffers[rx_msg_id] = ["" for i in range(num_pkts)]
             self.received_bitmap[rx_msg_id] = 0
             ack_no = 0
-            return rx_msg_id, ack_no
+            isNewMsg = True
+            return rx_msg_id, ack_no, isNewMsg
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
-        return -1
+        return -1, -1, -1
 
     def start(self):
         """Receive pkts and reassemble into messages
@@ -694,7 +701,7 @@ class EgressPipe(object):
             # wait for a pkt from the arbiter
             (meta, pkt) = yield self.arbiter_queue.get()
             eth = Ether(dst=SWITCH_MAC, src=NIC_MAC)
-            ip = IP(dst=meta.dst_ip, src=NIC_IP)
+            ip = IP(dst=meta.dst_ip, src=NIC_IP_TX)
             if meta.is_data:
                 self.log('Processing data pkt')
                 # add Ethernet/IP/NDP headers
@@ -710,6 +717,11 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
+            # # TODO: Serialization should be accounted for in TX as well (?)
+            #         The code below breaks the priority logic in the network
+            #         at the moment
+            # delay = len(pkt)*8/Simulator.tx_link_rate
+            # yield self.env.timeout(delay)
 
 class Arbiter(object):
     """Schedule pkts between PktGen and Packetize modules into EgressPipe"""
@@ -801,7 +813,7 @@ class CPU(object):
             Simulator.message_stats['message_sizes'].append(message_size)
             # construct the message from random bytes
             payload = ''.join([chr(random.randint(97, 122)) for i in range(message_size-len(SimMessage()))])
-            msg = App(ipv4_addr=NIC_IP, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
+            msg = App(ipv4_addr=NIC_IP_RX, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
             # record tx msg
             Simulator.tx_msgs.append(msg[App].payload) # no App header
             # send message
@@ -862,7 +874,12 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: {}'.format(pkt[NDP].flags))
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                               pkt[IP].dst,
+                                                                                                               pkt[NDP].src_context,
+                                                                                                               pkt[NDP].dst_context,
+                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                               pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
                 if random.random() < Network.data_pkt_trim_prob:
                     self.log('Trimming data pkt')
@@ -881,7 +898,12 @@ class Network(object):
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt ({}) to IngressPipe'.format(pkt[NDP].flags))
+            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                                   pkt[IP].dst,
+                                                                                                                   pkt[NDP].src_context,
+                                                                                                                   pkt[NDP].dst_context,
+                                                                                                                   pkt[NDP].pkt_offset,
+                                                                                                                   pkt[NDP].flags))
             self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
@@ -906,6 +928,7 @@ class Simulator(object):
         Simulator.min_message_size = Simulator.config['min_message_size'].next()
         Simulator.max_message_size = Simulator.config['max_message_size'].next()
         Simulator.rx_link_rate = Simulator.config['rx_link_rate'].next()
+        Simulator.tx_link_rate = Simulator.config['tx_link_rate'].next()
         Simulator.rtt_pkts = Simulator.config['rtt_pkts'].next()
         Simulator.max_num_timeouts = Simulator.config['max_num_timeouts'].next()
 
