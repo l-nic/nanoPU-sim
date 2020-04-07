@@ -186,16 +186,18 @@ class IngressPipe(object):
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
 
+                # compute pull_offset
+                if pkt_offset == ack_no:
+                    pull_offset = ack_no + Simulator.rtt_pkts
+                else:
+                    pull_offset = ack_no + Simulator.rtt_pkts - 1
+
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
                     # send NACK and PULL
                     genNACK = True
                     genPULL = True
 
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + 1
-                    else:
-                        pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
@@ -203,12 +205,6 @@ class IngressPipe(object):
                     #       last packet of the msg
                     #       (ie, if ack_no > compute_num_pkts(msg_len))
                     genPULL = True
-
-                    # compute pull_offset
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + Simulator.rtt_pkts + 1
-                    else:
-                        pull_offset = ack_no + Simulator.rtt_pkts
 
                     data = (ReassembleMeta(rx_msg_id,
                                            pkt[IP].src,
@@ -747,8 +743,10 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
-            # TODO: Serialization should be accounted for in TX as well (?)
-            # delay = len(pkt)*8/Simulator.rx_link_rate
+            # # TODO: Serialization should be accounted for in TX as well (?)
+            #         The code below breaks the priority logic in the network
+            #         at the moment
+            # delay = len(pkt)*8/Simulator.tx_link_rate
             # yield self.env.timeout(delay)
 
 class Arbiter(object):
@@ -956,6 +954,7 @@ class Simulator(object):
         Simulator.min_message_size = Simulator.config['min_message_size'].next()
         Simulator.max_message_size = Simulator.config['max_message_size'].next()
         Simulator.rx_link_rate = Simulator.config['rx_link_rate'].next()
+        Simulator.tx_link_rate = Simulator.config['tx_link_rate'].next()
         Simulator.rtt_pkts = Simulator.config['rtt_pkts'].next()
         Simulator.max_num_timeouts = Simulator.config['max_num_timeouts'].next()
 
