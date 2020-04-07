@@ -11,6 +11,7 @@ import json
 from collections import OrderedDict
 from headers import *
 from sim_utils import *
+import operator
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
@@ -179,6 +180,10 @@ class IngressPipe(object):
                                                     pkt[NDP].src_context,
                                                     pkt[NDP].tx_msg_id,
                                                     pkt[NDP].msg_len)
+                # NOTE: ack_no is the current acknowledgement number before
+                #       processing this incoming data packet because tthis
+                #       packet has not updated the received_bitmap in the
+                #       assembly buffer yet.
 
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
@@ -186,14 +191,24 @@ class IngressPipe(object):
                     genNACK = True
                     genPULL = True
 
-                    pull_offset = ack_no
+                    if pkt_offset == ack_no:
+                        pull_offset = ack_no + 1
+                    else:
+                        pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
+                    # TODO: No need to generate new PULL pkt if this was the
+                    #       last packet of the msg
+                    #       (ie, if ack_no > compute_num_pkts(msg_len))
                     genPULL = True
 
                     # compute pull_offset
-                    pull_offset = ack_no + Simulator.rtt_pkts
+                    if pkt_offset == ack_no:
+                        pull_offset = ack_no + Simulator.rtt_pkts + 1
+                    else:
+                        pull_offset = ack_no + Simulator.rtt_pkts
+
                     data = (ReassembleMeta(rx_msg_id,
                                            pkt[IP].src,
                                            pkt[NDP].src_context,
@@ -221,15 +236,12 @@ class IngressPipe(object):
                     self.deliveredEvent(tx_msg_id, pkt_offset, msg_len, was_delivered)
                 if pkt[NDP].flags.PULL:
                     self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
-                    # increase credit
-                    # TODO: this is not how NDP updates credit, but just to get
-                    #       something running ...
-                    # TODO: NDP needs to be able to compare the current pull
-                    #       offset and if pkt[NDP].pkt_offset. If the pkt_offset
-                    #       is greater than the current pull_offset, sets the
-                    #       pull_offset as the pkt_offset.
-                    credit = pkt[NDP].pkt_offset+1
-                    self.creditEvent(tx_msg_id, credit)
+                    # update credit
+                    credit = pkt[NDP].pkt_offset
+                    # self.creditEvent(tx_msg_id, credit)
+                    self.creditEvent(tx_msg_id, new_credit = credit,
+                                     dif_credit = None, opCode = 'write',
+                                     compVal = credit, relOp = operator.gt)
 
 class ReassembleMeta:
     def __init__(self, rx_msg_id, src_ip, src_context, tx_msg_id, msg_len, pkt_offset):
@@ -401,24 +413,52 @@ class Packetize(object):
 
     # TODO(sibanez): what is the best way to expose the credit state to the
     #                ingress pipeline?
-    # TODO: The ingress pipeline will need to know the current credit value
-    #       before setting/incrementing/changing it.
-    #       Additionally, the ingress pipeline will need to know other state
-    #       (ie. delivered_bitmap) to calculate the new credit value. We ideally
-    #       don't want this to be fixed function, so the state should be readable,
-    #       by the ingress pipeline.
-    def creditEvent(self, tx_msg_id, credit):
-        self.log('Processing creditEvent for msg {}, credit = {}'.format(tx_msg_id, credit))
+    # NOTE: creditEvent is implemented as a PRAW extern.
+    #       https://github.com/NetFPGA/P4-NetFPGA-public/wiki/PRAW-Extern-Function
+    def creditEvent(self, tx_msg_id, new_credit = None, dif_credit = None,
+                          opCode = None, compVal = None, relOp = None):
+        self.log('Processing creditEvent for msg {}'.format(tx_msg_id))
         # set the credit for the specified msg
         if (tx_msg_id in self.credit):
             # only increase credit if there are more pkts to transmit
-            # TODO: Credit (pulloffset for NDP) should be increased even if
-            #       there is no packet to transmit at the moment because there
-            #       might be packets in the future.
-            if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
-                self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
-                self.credit[tx_msg_id] = credit
-                # make the message active
+            # if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
+            #     self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
+            #     self.credit[tx_msg_id] = credit
+            #     # make the message active
+            #     self.enq_active_messages_fifo(tx_msg_id)
+
+            cur_credit = self.credit[tx_msg_id]
+            if relOp == None:
+                self.log('ERROR: creditEvent was triggered without a relOp value!')
+            elif compVal == None:
+                self.log('ERROR: creditEvent was triggered without a compVal value!')
+            elif opCode == None:
+                self.log('ERROR: creditEvent was triggered without a opCode value!')
+            elif opCode == 'write':
+                if new_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, new_credit))
+                        self.credit[tx_msg_id] = new_credit
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'write' opCode but no 'new_credit' value is provided!")
+            elif opCode == 'add':
+                if dif_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.credit[tx_msg_id] += dif_credit
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'add' opCode but no 'dif_credit' value is provided!")
+            elif opCode == 'shift_right':
+                if dif_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.credit[tx_msg_id] >>= dif_credit
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'shift_right' opCode but no 'dif_credit' value is provided!")
+            else:
+                self.log('ERROR: creditEvent was triggered for unknown opCode: {}'.format(opCode))
+
+            if self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1 != 0:
                 self.enq_active_messages_fifo(tx_msg_id)
         else:
             self.log('ERROR: creditEvent was triggered for unknown tx_msg_id: {}'.format(tx_msg_id))
@@ -479,7 +519,7 @@ class Packetize(object):
                 self.buffers[tx_msg_id].append(msg[(num_pkts-1)*Simulator.max_pkt_len:])
                 # initialize other state
                 self.delivered[tx_msg_id] = 0
-                self.credit[tx_msg_id] = Simulator.rtt_pkts
+                self.credit[tx_msg_id] = Simulator.rtt_pkts - 1 # index of 10th pkt is 9
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
                 self.max_tx_pkt_offset[tx_msg_id] = 0
                 self.timeout_count[tx_msg_id] = 0
