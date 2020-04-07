@@ -131,6 +131,10 @@ class IngressPipe(object):
         self.logger = Logger()
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
+
+        # Programmer-defined state to track credit for each message {rx_msg_id => credit}
+        self.credit = {} #Credit is the Pull Offset in NDP
+
         self.env.process(self.start())
 
     @staticmethod
@@ -177,21 +181,15 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                rx_msg_id, ack_no = self.getRxMsgID(pkt[IP].src,
-                                                    pkt[NDP].src_context,
-                                                    pkt[NDP].tx_msg_id,
-                                                    pkt[NDP].msg_len)
+                rx_msg_id, ack_no, isNewMsg = self.getRxMsgID(pkt[IP].src,
+                                                              pkt[NDP].src_context,
+                                                              pkt[NDP].tx_msg_id,
+                                                              pkt[NDP].msg_len)
                 # NOTE: ack_no is the current acknowledgement number before
                 #       processing this incoming data packet because tthis
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
-
-                # compute pull_offset
-                if pkt_offset == ack_no:
-                    pull_offset = ack_no + Simulator.rtt_pkts
-                else:
-                    pull_offset = ack_no + Simulator.rtt_pkts - 1
-
+                pull_offset_diff = 0
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
                     # send NACK and PULL
@@ -214,6 +212,16 @@ class IngressPipe(object):
                                            pkt[NDP].pkt_offset),
                             pkt[NDP].payload)
                     self.assemble_queue.put(data)
+                    pull_offset_diff = 1
+
+                # compute pull_offset with a PRAW extern
+                if isNewMsg:
+                    self.credit[rx_msg_id] = Simulator.rtt_pkts
+                    pull_offset = self.credit[rx_msg_id] + pull_offset_diff
+                else:
+                    self.credit[rx_msg_id] += pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
+
                 # fire event to generate control pkt(s)
                 # TODO: Instead of providing some arguments to the packet
                 #       generator, we should provide the exact transport layer
@@ -281,6 +289,7 @@ class Reassemble(object):
         """Obtain the rx_msg_id for the indicated message, or try to assign one.
         """
         key = (src_ip, src_context, tx_msg_id)
+        isNewMsg = False
         self.log('Processing getRxMsgID extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
@@ -291,7 +300,7 @@ class Reassemble(object):
             if ack_no is None:
                 self.log('Message {} has already been fully received'.format(rx_msg_id))
                 ack_no = compute_num_pkts(msg_len) + 1
-            return rx_msg_id, ack_no
+            return rx_msg_id, ack_no, isNewMsg
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -303,9 +312,10 @@ class Reassemble(object):
             self.buffers[rx_msg_id] = ["" for i in range(num_pkts)]
             self.received_bitmap[rx_msg_id] = 0
             ack_no = 0
-            return rx_msg_id, ack_no
+            isNewMsg = True
+            return rx_msg_id, ack_no, isNewMsg
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
-        return -1
+        return -1, -1, -1
 
     def start(self):
         """Receive pkts and reassemble into messages
