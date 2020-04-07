@@ -747,8 +747,9 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
-            delay = len(pkt)*8/Simulator.tx_link_rate
-            yield self.env.timeout(delay)
+            # TODO: Serialization should be accounted for in TX as well (?)
+            # delay = len(pkt)*8/Simulator.rx_link_rate
+            # yield self.env.timeout(delay)
 
 class Arbiter(object):
     """Schedule pkts between PktGen and Packetize modules into EgressPipe"""
