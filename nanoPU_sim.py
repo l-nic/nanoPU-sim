@@ -15,10 +15,11 @@ import operator
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
-NIC_IP = "10.0.0.1"
+NIC_IP_TX = "10.0.0.1"
+NIC_IP_RX = "10.0.0.2"
 
 SRC_CONTEXT=0
-DST_CONTEXT=0
+DST_CONTEXT=99
 
 # default cmdline args
 cmd_parser = argparse.ArgumentParser()
@@ -730,7 +731,7 @@ class EgressPipe(object):
             # wait for a pkt from the arbiter
             (meta, pkt) = yield self.arbiter_queue.get()
             eth = Ether(dst=SWITCH_MAC, src=NIC_MAC)
-            ip = IP(dst=meta.dst_ip, src=NIC_IP)
+            ip = IP(dst=meta.dst_ip, src=NIC_IP_TX)
             if meta.is_data:
                 self.log('Processing data pkt')
                 # add Ethernet/IP/NDP headers
@@ -746,6 +747,8 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
+            delay = len(pkt)*8/Simulator.tx_link_rate
+            yield self.env.timeout(delay)
 
 class Arbiter(object):
     """Schedule pkts between PktGen and Packetize modules into EgressPipe"""
@@ -837,7 +840,7 @@ class CPU(object):
             Simulator.message_stats['message_sizes'].append(message_size)
             # construct the message from random bytes
             payload = ''.join([chr(random.randint(97, 122)) for i in range(message_size-len(SimMessage()))])
-            msg = App(ipv4_addr=NIC_IP, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
+            msg = App(ipv4_addr=NIC_IP_RX, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
             # record tx msg
             Simulator.tx_msgs.append(msg[App].payload) # no App header
             # send message
@@ -898,7 +901,12 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: {}'.format(pkt[NDP].flags))
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                               pkt[IP].dst,
+                                                                                                               pkt[NDP].src_context,
+                                                                                                               pkt[NDP].dst_context,
+                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                               pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
                 if random.random() < Network.data_pkt_trim_prob:
                     self.log('Trimming data pkt')
@@ -917,7 +925,12 @@ class Network(object):
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt ({}) to IngressPipe'.format(pkt[NDP].flags))
+            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                                   pkt[IP].dst,
+                                                                                                                   pkt[NDP].src_context,
+                                                                                                                   pkt[NDP].dst_context,
+                                                                                                                   pkt[NDP].pkt_offset,
+                                                                                                                   pkt[NDP].flags))
             self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
