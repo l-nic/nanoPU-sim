@@ -214,11 +214,19 @@ class IngressPipe(object):
                     self.assemble_queue.put(data)
                     pull_offset_diff = 1
 
+<<<<<<< HEAD
                 # compute pull_offset with a PRAW extern
                 if isNewMsg:
                     self.credit[rx_msg_id] = Simulator.rtt_pkts
                     pull_offset = self.credit[rx_msg_id] + pull_offset_diff
                 else:
+=======
+                # compute pull_offset
+                if isNewMsg:
+                    pull_offset = Simulator.rtt_pkts + pull_offset_diff
+                else:
+                    #Implement a PRAW extern below
+>>>>>>> e8c3cff06a11a931e30f7f40b7ef6585c4d0b4b9
                     self.credit[rx_msg_id] += pull_offset_diff
                     pull_offset = self.credit[rx_msg_id]
 
