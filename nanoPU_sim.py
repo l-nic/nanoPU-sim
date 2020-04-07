@@ -104,9 +104,12 @@ def find_first_one(bitmap):
     """
     if bitmap == 0:
         return None
-    assert bitmap > 0, "ERROR: bitmap must be positive"
-    bits = bin(bitmap)[2:][::-1]
-    return bits.find('1')
+    # assert bitmap > 0, "ERROR: bitmap must be positive"
+    # bits = bin(bitmap)[2:][::-1]
+    # return bits.find('1')
+
+    # Prevent twos complement sign issue.
+    return int(math.log(bitmap & -bitmap, 2))
 
 def priority_encoder(bitmap):
     """Select an index based on the deployed priority selection policies
