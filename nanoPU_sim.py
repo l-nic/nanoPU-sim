@@ -11,6 +11,7 @@ import json
 from collections import OrderedDict
 from headers import *
 from sim_utils import *
+import operator
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
@@ -28,16 +29,16 @@ cmd_parser.add_argument('--config', type=str, help='JSON config file to control 
 ####
 
 class Logger(object):
-    debug = True
-    def __init__(self):
+    def __init__(self, debug=True):
         self.env = Simulator.env
+        self.debug = debug
 
     @staticmethod
     def init_params():
         pass
 
     def log(self, s):
-        if Logger.debug:
+        if self.debug:
             print '{}: {}'.format(self.env.now, s)
 
 def DistGenerator(varname):
@@ -81,7 +82,7 @@ def DistGenerator(varname):
         elif dist == 'normal':
             yield int(np.random.normal(kwargs['mean'], kwargs['stddev']))
         elif dist == 'poisson':
-            yield np.random.poisson(kwargs['lambda']) 
+            yield np.random.poisson(kwargs['lambda'])
         elif dist == 'lognormal':
             yield int(np.random.lognormal(kwargs['mean'], kwargs['sigma']))
         elif dist == 'exponential':
@@ -99,14 +100,24 @@ def DistGenerator(varname):
 def compute_num_pkts(msg_len):
     return msg_len/Simulator.max_pkt_len if (msg_len % Simulator.max_pkt_len == 0) else msg_len/Simulator.max_pkt_len + 1
 
-def priority_encoder(bitmap):
+def find_first_one(bitmap):
     """Find the first set bit in the provided bitmap
     """
     if bitmap == 0:
         return None
-    assert bitmap > 0, "ERROR: bitmap must be positive"
-    bits = bin(bitmap)[2:][::-1]
-    return bits.find('1')
+    # assert bitmap > 0, "ERROR: bitmap must be positive"
+    # bits = bin(bitmap)[2:][::-1]
+    # return bits.find('1')
+
+    # Prevent twos complement sign issue.
+    return int(math.log(bitmap & -bitmap, 2))
+
+def priority_encoder(bitmap):
+    """Select an index based on the deployed priority selection policies
+    """
+    first_one = True
+    if first_one:
+        return find_first_one(bitmap)
 
 #####
 # Architecture Elements
@@ -116,7 +127,7 @@ class IngressPipe(object):
     """P4 programmable ingress pipeline"""
     def __init__(self, net_queue, assemble_queue):
         self.env = Simulator.env
-        self.logger = Logger() 
+        self.logger = Logger()
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
         self.env.process(self.start())
@@ -150,6 +161,12 @@ class IngressPipe(object):
         while not Simulator.complete:
             # wait for a pkt from the network
             pkt = yield self.net_queue.get()
+
+            # defaults
+            tx_msg_id = pkt[NDP].tx_msg_id
+            pkt_offset = pkt[NDP].pkt_offset
+            msg_len = pkt[NDP].msg_len
+
             if pkt[NDP].flags.DATA:
                 self.log('Processing data pkt')
                 # defaults for generating control pkts
@@ -159,33 +176,59 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                tx_msg_id = pkt[NDP].tx_msg_id
-                msg_len = pkt[NDP].msg_len
-                pkt_offset = pkt[NDP].pkt_offset
-                pull_offset = 0
+                rx_msg_id, ack_no = self.getRxMsgID(pkt[IP].src,
+                                                    pkt[NDP].src_context,
+                                                    pkt[NDP].tx_msg_id,
+                                                    pkt[NDP].msg_len)
+                # NOTE: ack_no is the current acknowledgement number before
+                #       processing this incoming data packet because tthis
+                #       packet has not updated the received_bitmap in the
+                #       assembly buffer yet.
+
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
-                    # send NACK
+                    # send NACK and PULL
                     genNACK = True
+                    genPULL = True
+
+                    if pkt_offset == ack_no:
+                        pull_offset = ack_no + 1
+                    else:
+                        pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
+                    # TODO: No need to generate new PULL pkt if this was the
+                    #       last packet of the msg
+                    #       (ie, if ack_no > compute_num_pkts(msg_len))
                     genPULL = True
-                    rx_msg_id = self.getRxMsgID(pkt[IP].src, pkt[NDP].src_context, pkt[NDP].tx_msg_id, pkt[NDP].msg_len)
+
                     # compute pull_offset
-                    # TODO: this is not how NDP computes pull_offset, but just to get something running ...
-                    pull_offset = pkt[NDP].pkt_offset + Simulator.rtt_pkts
-                    data = (ReassembleMeta(rx_msg_id, pkt[IP].src, pkt[NDP].src_context, pkt[NDP].tx_msg_id, pkt[NDP].msg_len, pkt[NDP].pkt_offset), pkt[NDP].payload)
+                    if pkt_offset == ack_no:
+                        pull_offset = ack_no + Simulator.rtt_pkts + 1
+                    else:
+                        pull_offset = ack_no + Simulator.rtt_pkts
+
+                    data = (ReassembleMeta(rx_msg_id,
+                                           pkt[IP].src,
+                                           pkt[NDP].src_context,
+                                           pkt[NDP].tx_msg_id,
+                                           pkt[NDP].msg_len,
+                                           pkt[NDP].pkt_offset),
+                            pkt[NDP].payload)
                     self.assemble_queue.put(data)
                 # fire event to generate control pkt(s)
-                self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip, dst_context, src_context, tx_msg_id, msg_len, pkt_offset, pull_offset)
+                # TODO: Instead of providing some arguments to the packet
+                #       generator, we should provide the exact transport layer
+                #       header because we want the fixed function packet generator
+                #       to be able to generate packets for any transport protocol
+                #       that programmer deploys.
+                self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip,
+                                  dst_context, src_context, tx_msg_id,
+                                  msg_len, pkt_offset, pull_offset)
             else:
                 self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # control pkt for msg being transmitted
-                # defaults
-                tx_msg_id = pkt[NDP].tx_msg_id
-                pkt_offset = pkt[NDP].pkt_offset
-                msg_len = pkt[NDP].msg_len
                 if pkt[NDP].flags.ACK or pkt[NDP].flags.NACK:
                     was_delivered = pkt[NDP].flags.ACK
                     self.log('tx_msg_id: {}, pkt: {}, was_delivered: {}'.format(tx_msg_id, pkt_offset, was_delivered))
@@ -193,10 +236,12 @@ class IngressPipe(object):
                     self.deliveredEvent(tx_msg_id, pkt_offset, msg_len, was_delivered)
                 if pkt[NDP].flags.PULL:
                     self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
-                    # increase credit
-                    # TODO: this is not how NDP updates credit, but just to get something running ...
-                    credit = pkt[NDP].pkt_offset+1
-                    self.creditEvent(tx_msg_id, credit)
+                    # update credit
+                    credit = pkt[NDP].pkt_offset
+                    # self.creditEvent(tx_msg_id, credit)
+                    self.creditEvent(tx_msg_id, new_credit = credit,
+                                     dif_credit = None, opCode = 'write',
+                                     compVal = credit, relOp = operator.gt)
 
 class ReassembleMeta:
     def __init__(self, rx_msg_id, src_ip, src_context, tx_msg_id, msg_len, pkt_offset):
@@ -242,8 +287,14 @@ class Reassemble(object):
         self.log('Processing getRxMsgID extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
-            self.log('Found rx_msg_id: {}'.format(self.rx_msg_id_table[key]))
-            return self.rx_msg_id_table[key]
+            rx_msg_id = self.rx_msg_id_table[key]
+            self.log('Found rx_msg_id: {}'.format(rx_msg_id))
+            # compute the beginning of the inflight window
+            ack_no = find_first_one(~self.received_bitmap[rx_msg_id])
+            if ack_no is None:
+                self.log('Message {} has already been fully received'.format(rx_msg_id))
+                ack_no = compute_num_pkts(msg_len) + 1
+            return rx_msg_id, ack_no
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -254,7 +305,8 @@ class Reassemble(object):
             num_pkts = compute_num_pkts(msg_len)
             self.buffers[rx_msg_id] = ["" for i in range(num_pkts)]
             self.received_bitmap[rx_msg_id] = 0
-            return rx_msg_id
+            ack_no = 0
+            return rx_msg_id, ack_no
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
         return -1
 
@@ -264,11 +316,12 @@ class Reassemble(object):
         while not Simulator.complete:
             # wait for a data pkt to arrive: (AssembleMeta, data_pkt)
             (meta, pkt) = yield self.assemble_queue.get()
-            self.log('Processing pkt {} for msg {}'.format(meta.pkt_offset, meta.rx_msg_id))
+            self.log('Processing pkt {} for msg {}'.format(meta.pkt_offset,
+                                                           meta.rx_msg_id))
             # record pkt data in buffer
             self.buffers[meta.rx_msg_id][meta.pkt_offset] = str(pkt)
             # mark the pkt as received
-            # NOTE: received_bitmap must have 2 write ports
+            # NOTE: received_bitmap must have 2 write ports: here and in getRxMsgID()
             self.received_bitmap[meta.rx_msg_id] = self.received_bitmap[meta.rx_msg_id] | (1 << meta.pkt_offset)
             # check if all pkts have been received
             num_pkts = compute_num_pkts(meta.msg_len)
@@ -291,7 +344,7 @@ class Packetize(object):
         self.cpu_queue = cpu_queue
 
         ####
-        # initialize state
+        # initialize state for tx messages
         ####
         # freelist of tx msg ids
         self.tx_msg_id_freelist = [i for i in range(Packetize.max_messages)]
@@ -316,7 +369,6 @@ class Packetize(object):
 
         self.env.process(self.start())
 
-
     @staticmethod
     def init_params():
         Packetize.max_messages = Simulator.config['packetize_max_messages'].next()
@@ -331,7 +383,8 @@ class Packetize(object):
     def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len, was_delivered):
         """Mark a packet as either having been delivered or dropped
         """
-        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id, pkt_offset))
+        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id,
+                                                                       pkt_offset))
         if (tx_msg_id in self.delivered) and (tx_msg_id in self.toBtx):
             if was_delivered:
                 self.log("Marking pkt {} as delivered".format(pkt_offset))
@@ -358,16 +411,54 @@ class Packetize(object):
         else:
             self.log("ERROR: deliveredEvent was triggered for unknown tx_msg_id: {}".format(tx_msg_id))
 
-    # TODO(sibanez): what is the best way to expose the credit state to the ingress pipeline?
-    def creditEvent(self, tx_msg_id, credit):
-        self.log('Processing creditEvent for msg {}, credit = {}'.format(tx_msg_id, credit))
+    # TODO(sibanez): what is the best way to expose the credit state to the
+    #                ingress pipeline?
+    # NOTE: creditEvent is implemented as a PRAW extern.
+    #       https://github.com/NetFPGA/P4-NetFPGA-public/wiki/PRAW-Extern-Function
+    def creditEvent(self, tx_msg_id, new_credit = None, dif_credit = None,
+                          opCode = None, compVal = None, relOp = None):
+        self.log('Processing creditEvent for msg {}'.format(tx_msg_id))
         # set the credit for the specified msg
         if (tx_msg_id in self.credit):
             # only increase credit if there are more pkts to transmit
-            if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
-                self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
-                self.credit[tx_msg_id] = credit
-                # make the message active
+            # if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
+            #     self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
+            #     self.credit[tx_msg_id] = credit
+            #     # make the message active
+            #     self.enq_active_messages_fifo(tx_msg_id)
+
+            cur_credit = self.credit[tx_msg_id]
+            if relOp == None:
+                self.log('ERROR: creditEvent was triggered without a relOp value!')
+            elif compVal == None:
+                self.log('ERROR: creditEvent was triggered without a compVal value!')
+            elif opCode == None:
+                self.log('ERROR: creditEvent was triggered without a opCode value!')
+            elif opCode == 'write':
+                if new_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, new_credit))
+                        self.credit[tx_msg_id] = new_credit
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'write' opCode but no 'new_credit' value is provided!")
+            elif opCode == 'add':
+                if dif_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.credit[tx_msg_id] += dif_credit
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'add' opCode but no 'dif_credit' value is provided!")
+            elif opCode == 'shift_right':
+                if dif_credit != None:
+                    if relOp(compVal, cur_credit):
+                        self.credit[tx_msg_id] >>= dif_credit
+                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
+                else:
+                    self.log("ERROR: creditEvent was triggered with 'shift_right' opCode but no 'dif_credit' value is provided!")
+            else:
+                self.log('ERROR: creditEvent was triggered for unknown opCode: {}'.format(opCode))
+
+            if self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1 != 0:
                 self.enq_active_messages_fifo(tx_msg_id)
         else:
             self.log('ERROR: creditEvent was triggered for unknown tx_msg_id: {}'.format(tx_msg_id))
@@ -428,7 +519,7 @@ class Packetize(object):
                 self.buffers[tx_msg_id].append(msg[(num_pkts-1)*Simulator.max_pkt_len:])
                 # initialize other state
                 self.delivered[tx_msg_id] = 0
-                self.credit[tx_msg_id] = Simulator.rtt_pkts
+                self.credit[tx_msg_id] = Simulator.rtt_pkts - 1 # index of 10th pkt is 9
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
                 self.max_tx_pkt_offset[tx_msg_id] = 0
                 self.timeout_count[tx_msg_id] = 0
@@ -563,7 +654,8 @@ class PktGen(object):
     def log(self, msg):
         self.logger.log('PktGen: {}'.format(msg))
 
-    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context, src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
+    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context,
+                     src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
         self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
@@ -598,6 +690,8 @@ class PktGen(object):
         while not Simulator.complete:
             data = yield self.pacer_queue.get()
             # For now, assume that each PULL pkt pulls one max size pkt
+            # TODO: Pacing should be done according to the packet size of the
+            #       message that is being pulled (ie, MTU)
             delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
             yield self.env.timeout(delay)
             self.log('Pacer is releasing a PULL pkt')
@@ -677,7 +771,8 @@ class Arbiter(object):
         while not Simulator.complete:
             pktgen_deq = self.pktgen_queue.get()
             pktize_deq = self.env.process(self.pktize_module.dequeue())
-            # wait for either the pktize module or the pktgen module to have a pkt ready
+            # wait for either the pktize module or the pktgen module to
+            # have a pkt ready
             result = yield pktize_deq | pktgen_deq
             if pktgen_deq in result:
                 self.log('Scheduling control pkt')
@@ -685,6 +780,7 @@ class Arbiter(object):
                 self.egress_queue.put(data)
             else:
                 pktgen_deq.cancel()
+
             if pktize_deq in result:
                 self.log('Scheduling data pkt')
                 data = result[pktize_deq]
@@ -865,6 +961,7 @@ class Simulator(object):
         self.logger = Logger()
 
         # create queues
+        # TODO: Add capacity to those queues for realistic simulations
         ingress_net_queue = simpy.Store(self.env)
         egress_net_queue = simpy.Store(self.env)
         assemble_queue = simpy.Store(self.env)
@@ -982,7 +1079,8 @@ def run_sim(cmdline_args, *args):
             Arbiter.init_params()
             CPU.init_params()
             Network.init_params()
-            Simulator.out_run_dir = os.path.join(Simulator.out_dir, 'run-{}'.format(run_cnt))
+            Simulator.out_run_dir = os.path.join(Simulator.out_dir,
+                                                 'run-{}'.format(run_cnt))
             run_cnt += 1
             env = simpy.Environment()
             Simulator.env = env
@@ -999,4 +1097,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
