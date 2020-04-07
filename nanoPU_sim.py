@@ -497,7 +497,7 @@ class Packetize(object):
                 self.buffers[tx_msg_id].append(msg[(num_pkts-1)*Simulator.max_pkt_len:])
                 # initialize other state
                 self.delivered[tx_msg_id] = 0
-                self.credit[tx_msg_id] = Simulator.rtt_pkts - 1
+                self.credit[tx_msg_id] = Simulator.rtt_pkts
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
                 self.max_tx_pkt_offset[tx_msg_id] = 0
                 self.timeout_count[tx_msg_id] = 0
