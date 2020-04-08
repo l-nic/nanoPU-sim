@@ -139,8 +139,8 @@ class IngressPipe(object):
     # Methods to wire up events/externs
     ########
 
-    def init_getRxMsgID(self, getRxMsgID):
-        self.getRxMsgID = getRxMsgID
+    def init_getRxMsgInfo(self, getRxMsgInfo):
+        self.getRxMsgInfo = getRxMsgInfo
 
     def init_deliveredEvent(self, deliveredEvent):
         self.deliveredEvent = deliveredEvent
@@ -172,10 +172,11 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                rx_msg_id, ack_no, isNewMsg = self.getRxMsgID(pkt[IP].src,
-                                                              pkt[NDP].src_context,
-                                                              pkt[NDP].tx_msg_id,
-                                                              pkt[NDP].msg_len)
+                rx_msg_id, ack_no, isNewMsg, isNewPkt = self.getRxMsgInfo(pkt[IP].src,
+                                                                          pkt[NDP].src_context,
+                                                                          pkt[NDP].tx_msg_id,
+                                                                          pkt[NDP].msg_len,
+                                                                          pkt[NDP].pkt_offset)
                 # NOTE: ack_no is the current acknowledgement number before
                 #       processing this incoming data packet because this
                 #       packet has not updated the received_bitmap in the
@@ -274,12 +275,13 @@ class Reassemble(object):
     def log(self, msg):
         self.logger.log('Reassemble: {}'.format(msg))
 
-    def getRxMsgID(self, src_ip, src_context, tx_msg_id, msg_len):
+    def getRxMsgInfo(self, src_ip, src_context, tx_msg_id, msg_len, pkt_offset):
         """Obtain the rx_msg_id for the indicated message, or try to assign one.
         """
         key = (src_ip, src_context, tx_msg_id)
         isNewMsg = False
-        self.log('Processing getRxMsgID extern call for: {}'.format(key))
+        isNewPkt = False
+        self.log('Processing getRxMsgInfo extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
             rx_msg_id = self.rx_msg_id_table[key]
@@ -289,7 +291,8 @@ class Reassemble(object):
             if ack_no is None:
                 self.log('Message {} has already been fully received'.format(rx_msg_id))
                 ack_no = compute_num_pkts(msg_len) + 1
-            return rx_msg_id, ack_no, isNewMsg
+            isNewPkt = ( self.received_bitmap[rx_msg_id] & (1<<pkt_offset)-1 ) == 0
+            return rx_msg_id, ack_no, isNewMsg, isNewPkt
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -302,9 +305,10 @@ class Reassemble(object):
             self.received_bitmap[rx_msg_id] = 0
             ack_no = 0
             isNewMsg = True
-            return rx_msg_id, ack_no, isNewMsg
+            isNewPkt = True
+            return rx_msg_id, ack_no, isNewMsg, isNewPkt
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
-        return -1, -1, -1
+        return -1, -1, -1, -1
 
     def start(self):
         """Receive pkts and reassemble into messages
@@ -317,7 +321,7 @@ class Reassemble(object):
             # record pkt data in buffer
             self.buffers[meta.rx_msg_id][meta.pkt_offset] = str(pkt)
             # mark the pkt as received
-            # NOTE: received_bitmap must have 2 write ports: here and in getRxMsgID()
+            # NOTE: received_bitmap must have 2 write ports: here and in getRxMsgInfo()
             self.received_bitmap[meta.rx_msg_id] = self.received_bitmap[meta.rx_msg_id] | (1 << meta.pkt_offset)
             # check if all pkts have been received
             num_pkts = compute_num_pkts(meta.msg_len)
@@ -328,7 +332,7 @@ class Reassemble(object):
                 app_msg = App(ipv4_addr=meta.src_ip, context_id=meta.src_context, msg_len=meta.msg_len)/SimMessage(msg_data)
                 self.cpu_queue.put(app_msg)
                 # free the rx_msg_id
-                # NOTE: the rx_msg_id_table must have 2 write ports: here and in getRxMsgID()
+                # NOTE: the rx_msg_id_table must have 2 write ports: here and in getRxMsgInfo()
                 del self.rx_msg_id_table[(meta.src_ip, meta.src_context, meta.tx_msg_id)]
                 self.rx_msg_id_freelist.append(meta.rx_msg_id)
 
@@ -965,7 +969,7 @@ class Simulator(object):
         self.network = Network(egress_net_queue, ingress_net_queue)
 
         # wire up events/externs
-        self.ingress.init_getRxMsgID(self.reassemble.getRxMsgID)
+        self.ingress.init_getRxMsgInfo(self.reassemble.getRxMsgInfo)
         self.ingress.init_deliveredEvent(self.packetize.deliveredEvent)
         self.ingress.init_creditToBtxEvent(self.packetize.creditToBtxEvent)
         self.ingress.init_ctrlPktEvent(self.pktgen.ctrlPktEvent)
