@@ -443,6 +443,9 @@ class Packetize(object):
                 # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
                 self.toBtx[tx_msg_id] ^= tx_pkts
 
+        if (tx_msg_id not in self.credit):
+            self.log('ERROR: creditEvent was triggered for unknown tx_msg_id: {}'.format(tx_msg_id))
+
     def timeoutEvent(self, tx_msg_id, rtx_offset):
         self.log('Processing timeoutEvent for msg {}'.format(tx_msg_id))
         if self.timeout_count[tx_msg_id] >= Simulator.max_num_timeouts:
