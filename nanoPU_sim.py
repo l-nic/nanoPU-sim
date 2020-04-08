@@ -111,13 +111,6 @@ def find_first_one(bitmap):
     # Prevent twos complement sign issue.
     return int(math.log(bitmap & -bitmap, 2))
 
-def priority_encoder(bitmap):
-    """Select an index based on the deployed priority selection policies
-    """
-    first_one = True
-    if first_one:
-        return find_first_one(bitmap)
-
 #####
 # Architecture Elements
 #####
@@ -533,7 +526,7 @@ class Packetize(object):
                 self.env.exit(None)
 
         # use priority encoder to pick pkt to send
-        pkt_offset = priority_encoder(self.active_tx_pkts)
+        pkt_offset = find_first_one(self.active_tx_pkts)
         tx_msg_id = self.active_tx_msg_id
         if pkt_offset is not None:
             self.log('Transmiting pkt {} from msg {}'.format(pkt_offset, tx_msg_id))
