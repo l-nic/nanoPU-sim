@@ -12,13 +12,15 @@ from collections import OrderedDict
 from headers import *
 from sim_utils import *
 import operator
+import math
 
 SWITCH_MAC = "08:55:66:77:88:08"
 NIC_MAC = "08:11:22:33:44:08"
-NIC_IP = "10.0.0.1"
+NIC_IP_TX = "10.0.0.1"
+NIC_IP_RX = "10.0.0.2"
 
 SRC_CONTEXT=0
-DST_CONTEXT=0
+DST_CONTEXT=99
 
 # default cmdline args
 cmd_parser = argparse.ArgumentParser()
@@ -101,23 +103,13 @@ def compute_num_pkts(msg_len):
     return msg_len/Simulator.max_pkt_len if (msg_len % Simulator.max_pkt_len == 0) else msg_len/Simulator.max_pkt_len + 1
 
 def find_first_one(bitmap):
-    """Find the first set bit in the provided bitmap
+    """Find the first set bit in the provided bitmap.
+       NOTE: this may not work as expected when doing: find_first_one(~value) if value is all 1's
     """
     if bitmap == 0:
         return None
-    # assert bitmap > 0, "ERROR: bitmap must be positive"
-    # bits = bin(bitmap)[2:][::-1]
-    # return bits.find('1')
-
     # Prevent twos complement sign issue.
     return int(math.log(bitmap & -bitmap, 2))
-
-def priority_encoder(bitmap):
-    """Select an index based on the deployed priority selection policies
-    """
-    first_one = True
-    if first_one:
-        return find_first_one(bitmap)
 
 #####
 # Architecture Elements
@@ -130,6 +122,10 @@ class IngressPipe(object):
         self.logger = Logger()
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
+
+        # Programmer-defined state to track credit for each message {rx_msg_id => credit}
+        self.credit = {} #Credit is the Pull Offset in NDP
+
         self.env.process(self.start())
 
     @staticmethod
@@ -149,8 +145,8 @@ class IngressPipe(object):
     def init_deliveredEvent(self, deliveredEvent):
         self.deliveredEvent = deliveredEvent
 
-    def init_creditEvent(self, creditEvent):
-        self.creditEvent = creditEvent
+    def init_creditToBtxEvent(self, creditToBtxEvent):
+        self.creditToBtxEvent = creditToBtxEvent
 
     def init_ctrlPktEvent(self, ctrlPktEvent):
         self.ctrlPktEvent = ctrlPktEvent
@@ -176,25 +172,21 @@ class IngressPipe(object):
                 dst_ip = pkt[IP].src
                 dst_context = pkt[NDP].src_context
                 src_context = pkt[NDP].dst_context
-                rx_msg_id, ack_no = self.getRxMsgID(pkt[IP].src,
-                                                    pkt[NDP].src_context,
-                                                    pkt[NDP].tx_msg_id,
-                                                    pkt[NDP].msg_len)
+                rx_msg_id, ack_no, isNewMsg = self.getRxMsgID(pkt[IP].src,
+                                                              pkt[NDP].src_context,
+                                                              pkt[NDP].tx_msg_id,
+                                                              pkt[NDP].msg_len)
                 # NOTE: ack_no is the current acknowledgement number before
-                #       processing this incoming data packet because tthis
+                #       processing this incoming data packet because this
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
-
+                pull_offset_diff = 0
                 if pkt[NDP].flags.CHOP:
                     self.log('Processing chopped data pkt')
                     # send NACK and PULL
                     genNACK = True
                     genPULL = True
 
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + 1
-                    else:
-                        pull_offset = ack_no
                 else:
                     # process DATA pkt
                     genACK = True
@@ -202,12 +194,6 @@ class IngressPipe(object):
                     #       last packet of the msg
                     #       (ie, if ack_no > compute_num_pkts(msg_len))
                     genPULL = True
-
-                    # compute pull_offset
-                    if pkt_offset == ack_no:
-                        pull_offset = ack_no + Simulator.rtt_pkts + 1
-                    else:
-                        pull_offset = ack_no + Simulator.rtt_pkts
 
                     data = (ReassembleMeta(rx_msg_id,
                                            pkt[IP].src,
@@ -217,6 +203,16 @@ class IngressPipe(object):
                                            pkt[NDP].pkt_offset),
                             pkt[NDP].payload)
                     self.assemble_queue.put(data)
+                    pull_offset_diff = 1
+
+                # compute pull_offset with a PRAW extern
+                if isNewMsg:
+                    self.credit[rx_msg_id] = Simulator.rtt_pkts + pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
+                else:
+                    self.credit[rx_msg_id] += pull_offset_diff
+                    pull_offset = self.credit[rx_msg_id]
+
                 # fire event to generate control pkt(s)
                 # TODO: Instead of providing some arguments to the packet
                 #       generator, we should provide the exact transport layer
@@ -227,21 +223,19 @@ class IngressPipe(object):
                                   dst_context, src_context, tx_msg_id,
                                   msg_len, pkt_offset, pull_offset)
             else:
-                self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
+                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags, tx_msg_id, pkt[NDP].pkt_offset))
                 # control pkt for msg being transmitted
-                if pkt[NDP].flags.ACK or pkt[NDP].flags.NACK:
-                    was_delivered = pkt[NDP].flags.ACK
-                    self.log('tx_msg_id: {}, pkt: {}, was_delivered: {}'.format(tx_msg_id, pkt_offset, was_delivered))
-                    # fire event to update state in packetization module
-                    self.deliveredEvent(tx_msg_id, pkt_offset, msg_len, was_delivered)
-                if pkt[NDP].flags.PULL:
-                    self.log('Received PULL pkt for tx_msg_id {}, pull offset: {}'.format(tx_msg_id, pkt[NDP].pkt_offset))
-                    # update credit
-                    credit = pkt[NDP].pkt_offset
-                    # self.creditEvent(tx_msg_id, credit)
-                    self.creditEvent(tx_msg_id, new_credit = credit,
-                                     dif_credit = None, opCode = 'write',
-                                     compVal = credit, relOp = operator.gt)
+                if pkt[NDP].flags.ACK:
+                    # fire event to mark pkt as delivered
+                    self.deliveredEvent(tx_msg_id, pkt_offset, msg_len)
+                if pkt[NDP].flags.PULL or pkt[NDP].flags.NACK:
+                    # mark pkt for rtx for NACK
+                    rtx_pkt = pkt_offset if pkt[NDP].flags.NACK else None
+                    # update credit for PULL
+                    credit = pkt[NDP].pkt_offset if pkt[NDP].flags.PULL else None
+                    self.creditToBtxEvent(tx_msg_id, rtx_pkt = rtx_pkt, new_credit = credit,
+                                          opCode = 'write', compVal = credit,
+                                          relOp = operator.gt)
 
 class ReassembleMeta:
     def __init__(self, rx_msg_id, src_ip, src_context, tx_msg_id, msg_len, pkt_offset):
@@ -284,6 +278,7 @@ class Reassemble(object):
         """Obtain the rx_msg_id for the indicated message, or try to assign one.
         """
         key = (src_ip, src_context, tx_msg_id)
+        isNewMsg = False
         self.log('Processing getRxMsgID extern call for: {}'.format(key))
         # check if this msg has already been allocated an rx_msg_id
         if key in self.rx_msg_id_table:
@@ -294,7 +289,7 @@ class Reassemble(object):
             if ack_no is None:
                 self.log('Message {} has already been fully received'.format(rx_msg_id))
                 ack_no = compute_num_pkts(msg_len) + 1
-            return rx_msg_id, ack_no
+            return rx_msg_id, ack_no, isNewMsg
         # try to allocate an rx_msg_id
         if len(self.rx_msg_id_freelist) > 0:
             rx_msg_id = self.rx_msg_id_freelist.pop(0)
@@ -306,9 +301,10 @@ class Reassemble(object):
             self.buffers[rx_msg_id] = ["" for i in range(num_pkts)]
             self.received_bitmap[rx_msg_id] = 0
             ack_no = 0
-            return rx_msg_id, ack_no
+            isNewMsg = True
+            return rx_msg_id, ack_no, isNewMsg
         self.log('ERROR: failed to allocate rx_msg_id for: {}'.format(key))
-        return -1
+        return -1, -1, -1
 
     def start(self):
         """Receive pkts and reassemble into messages
@@ -348,10 +344,11 @@ class Packetize(object):
         ####
         # freelist of tx msg ids
         self.tx_msg_id_freelist = [i for i in range(Packetize.max_messages)]
-        # FIFO queue of active message IDs
-        self.active_messages_fifo = simpy.Store(self.env)
-        # bitmap to track which messages are currently active
-        self.active_messages_bitmap = 0
+        # FIFO queue of pkts to TX
+        self.scheduled_pkts_fifo = simpy.Store(self.env)
+        # Flip flop state to track msg and pkts currently being transmitted
+        self.active_tx_msg_id = 0
+        self.active_tx_pkts = 0
         # state to track which pkts have been delivered {tx_msg_id => bitmap}
         self.delivered = {}
         # state to track credit for each message {tx_msg_id => credit}
@@ -380,53 +377,41 @@ class Packetize(object):
     # Event Methods
     ####
 
-    def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len, was_delivered):
-        """Mark a packet as either having been delivered or dropped
+    def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len):
+        """Mark a packet as delivered
         """
         self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id,
                                                                        pkt_offset))
-        if (tx_msg_id in self.delivered) and (tx_msg_id in self.toBtx):
-            if was_delivered:
-                self.log("Marking pkt {} as delivered".format(pkt_offset))
-                delivered_bitmap = self.delivered[tx_msg_id]
-                self.delivered[tx_msg_id] = delivered_bitmap | (1<<pkt_offset)
-                # check if the whole message has been delivered
-                num_pkts = compute_num_pkts(msg_len)
-                if self.delivered[tx_msg_id] == (1<<num_pkts)-1:
-                    self.log("The whole msg was delivered!")
-                    # cancel the timer for this msg
-                    self.cancelTimerEvent(tx_msg_id)
-                    # free the tx_msg_id
-                    self.tx_msg_id_freelist.append(tx_msg_id)
-                    # message_cnt increases when message is fully ACKed
-                    Simulator.message_cnt += 1
-                    # check if simulation is complete
-                    Simulator.check_done()
-            else:
-                self.log("Marking the pkt for retransmission")
-                toBtx_bitmap = self.toBtx[tx_msg_id]
-                self.toBtx[tx_msg_id] = toBtx_bitmap | (1<<pkt_offset)
-                # make the message active
-                self.enq_active_messages_fifo(tx_msg_id)
+        if tx_msg_id in self.delivered:
+            self.log("Marking pkt {} as delivered".format(pkt_offset))
+            self.delivered[tx_msg_id] |= (1<<pkt_offset)
+            # check if the whole message has been delivered
+            num_pkts = compute_num_pkts(msg_len)
+            if self.delivered[tx_msg_id] == (1<<num_pkts)-1:
+                self.log("The whole msg was delivered!")
+                # cancel the timer for this msg
+                self.cancelTimerEvent(tx_msg_id)
+                # free the tx_msg_id
+                self.tx_msg_id_freelist.append(tx_msg_id)
+                # message_cnt increases when message is fully ACKed
+                Simulator.message_cnt += 1
+                # check if simulation is complete
+                Simulator.check_done()
         else:
             self.log("ERROR: deliveredEvent was triggered for unknown tx_msg_id: {}".format(tx_msg_id))
 
-    # TODO(sibanez): what is the best way to expose the credit state to the
-    #                ingress pipeline?
-    # NOTE: creditEvent is implemented as a PRAW extern.
+    # NOTE: credit state update is implemented as a PRAW atom.
     #       https://github.com/NetFPGA/P4-NetFPGA-public/wiki/PRAW-Extern-Function
-    def creditEvent(self, tx_msg_id, new_credit = None, dif_credit = None,
-                          opCode = None, compVal = None, relOp = None):
-        self.log('Processing creditEvent for msg {}'.format(tx_msg_id))
-        # set the credit for the specified msg
-        if (tx_msg_id in self.credit):
-            # only increase credit if there are more pkts to transmit
-            # if credit > self.credit[tx_msg_id] and self.toBtx[tx_msg_id] & (1<<credit)-1 != 0:
-            #     self.log('Increasing credit for msg {} from {} to {}'.format(tx_msg_id, self.credit[tx_msg_id], credit))
-            #     self.credit[tx_msg_id] = credit
-            #     # make the message active
-            #     self.enq_active_messages_fifo(tx_msg_id)
+    def creditToBtxEvent(self, tx_msg_id, rtx_pkt = None, new_credit = None,
+                         opCode = None, compVal = None, relOp = None):
+        self.log('Processing creditToBtxEvent for tx_msg_id {}'.format(tx_msg_id))
+        # Read-Modify-Write to update toBtx state variable
+        if (tx_msg_id in self.toBtx) and (rtx_pkt is not None):
+            self.log('Marking tx_msg_id {}, pkt {} for retransmission'.format(tx_msg_id, rtx_pkt))
+            self.toBtx[tx_msg_id] |= 1<<rtx_pkt
 
+        # Read-Modify-Write to update credit state variable
+        if (tx_msg_id in self.credit) and new_credit is not None:
             cur_credit = self.credit[tx_msg_id]
             if relOp == None:
                 self.log('ERROR: creditEvent was triggered without a relOp value!')
@@ -435,33 +420,28 @@ class Packetize(object):
             elif opCode == None:
                 self.log('ERROR: creditEvent was triggered without a opCode value!')
             elif opCode == 'write':
-                if new_credit != None:
-                    if relOp(compVal, cur_credit):
-                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, new_credit))
-                        self.credit[tx_msg_id] = new_credit
-                else:
-                    self.log("ERROR: creditEvent was triggered with 'write' opCode but no 'new_credit' value is provided!")
+                if relOp(compVal, cur_credit):
+                    self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, new_credit))
+                    self.credit[tx_msg_id] = new_credit
             elif opCode == 'add':
-                if dif_credit != None:
-                    if relOp(compVal, cur_credit):
-                        self.credit[tx_msg_id] += dif_credit
-                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
-                else:
-                    self.log("ERROR: creditEvent was triggered with 'add' opCode but no 'dif_credit' value is provided!")
+                if relOp(compVal, cur_credit):
+                    self.credit[tx_msg_id] += new_credit
+                    self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
             elif opCode == 'shift_right':
-                if dif_credit != None:
-                    if relOp(compVal, cur_credit):
-                        self.credit[tx_msg_id] >>= dif_credit
-                        self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
-                else:
-                    self.log("ERROR: creditEvent was triggered with 'shift_right' opCode but no 'dif_credit' value is provided!")
+                if relOp(compVal, cur_credit):
+                    self.credit[tx_msg_id] >>= new_credit
+                    self.log('Changing credit for msg {} from {} to {}'.format(tx_msg_id, cur_credit, self.credit[tx_msg_id]))
             else:
                 self.log('ERROR: creditEvent was triggered for unknown opCode: {}'.format(opCode))
 
-            if self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1 != 0:
-                self.enq_active_messages_fifo(tx_msg_id)
-        else:
-            self.log('ERROR: creditEvent was triggered for unknown tx_msg_id: {}'.format(tx_msg_id))
+            # NOTE: here's another Read-Modify-Write to update toBtx state, which
+            #   should be combined with the above operation in the actual HW implementation
+            tx_pkts = self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1
+            if tx_pkts != 0:
+                # schedule the pkts for transmission
+                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts))
+                # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
+                self.toBtx[tx_msg_id] ^= tx_pkts
 
     def timeoutEvent(self, tx_msg_id, rtx_offset):
         self.log('Processing timeoutEvent for msg {}'.format(tx_msg_id))
@@ -478,13 +458,11 @@ class Packetize(object):
             rtx_pkts_mask = (1<<rtx_offset)-1
             rtx_pkts = ~delivered_bitmap & rtx_pkts_mask
             self.log('Pkts to retransmit: {:b}'.format(rtx_pkts))
-            toBtx_bitmap = self.toBtx[tx_msg_id]
-            self.toBtx[tx_msg_id] = toBtx_bitmap | rtx_pkts
             # reschedule timer for this msg
             self.rescheduleTimerEvent(tx_msg_id, self.max_tx_pkt_offset[tx_msg_id])
             if rtx_pkts != 0:
-                # make the message active
-                self.enq_active_messages_fifo(tx_msg_id)
+                # schedule the pkts for transmission
+                self.scheduled_pkts_fifo.put((tx_msg_id, rtx_pkts))
                 # increase timeout counter
                 self.timeout_count[tx_msg_id] += 1
 
@@ -519,49 +497,37 @@ class Packetize(object):
                 self.buffers[tx_msg_id].append(msg[(num_pkts-1)*Simulator.max_pkt_len:])
                 # initialize other state
                 self.delivered[tx_msg_id] = 0
-                self.credit[tx_msg_id] = Simulator.rtt_pkts - 1 # index of 10th pkt is 9
+                self.credit[tx_msg_id] = Simulator.rtt_pkts
                 self.toBtx[tx_msg_id] = (1<<num_pkts)-1 # every pkt must be transmitted
                 self.max_tx_pkt_offset[tx_msg_id] = 0
                 self.timeout_count[tx_msg_id] = 0
                 # schedule a timer for this msg
                 self.scheduleTimerEvent(tx_msg_id, 0)
-                # make this message active
-                self.enq_active_messages_fifo(tx_msg_id)
+                # schedule the first pkts of the msg for transmission
+                tx_pkts = self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1
+                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts))
             else:
                 self.log('ERROR: dropping message due to lack of an available tx_msg_id')
-
-    def enq_active_messages_fifo(self, tx_msg_id):
-        # make sure msg is not already active
-        if self.active_messages_bitmap & (1<<tx_msg_id) == 0:
-            self.log('Enqueueing msg {} into active_messages_fifo'.format(tx_msg_id))
-            self.active_messages_fifo.put(tx_msg_id)
-            # mark as active (flip bit)
-            self.active_messages_bitmap = self.active_messages_bitmap ^ (1<<tx_msg_id)
-        else:
-            self.log('Msg {} is already active')
 
     def dequeue(self):
         """Send a data pkt to the arbiter. The arbiter invokes this method when it decides to
            schedule a data pkt.
         """
-        wait_active_msg_event = self.active_messages_fifo.get()
-        try:
-            # wait for a msg to become active
-            tx_msg_id = yield wait_active_msg_event
-        except simpy.Interrupt as i:
-            wait_active_msg_event.cancel()
-            self.env.exit(None)
+        # check if we've finished sending all the currently active pkts
+        if self.active_tx_pkts == 0:
+            wait_scheduled_pkts_event = self.scheduled_pkts_fifo.get()
+            try:
+                # wait for pkts to be scheduled
+                (tx_msg_id, tx_pkts) = yield wait_scheduled_pkts_event
+                self.active_tx_msg_id = tx_msg_id
+                self.active_tx_pkts = tx_pkts
+            except simpy.Interrupt as i:
+                wait_scheduled_pkts_event.cancel()
+                self.env.exit(None)
 
-        # mark msg as inactive (flip bit)
-        self.active_messages_bitmap = self.active_messages_bitmap ^ (1<<tx_msg_id)
-        # lookup which pkts of this msg need to be transmitted
-        toBtx_bitmap = self.toBtx[tx_msg_id]
-        credit = self.credit[tx_msg_id]
-        credit_bitmap = (1<<credit)-1
-        # the only pkts that are eligible are the ones at an index < credit
-        eligible_pkts_bitmap = toBtx_bitmap & credit_bitmap
         # use priority encoder to pick pkt to send
-        pkt_offset = priority_encoder(eligible_pkts_bitmap)
+        pkt_offset = find_first_one(self.active_tx_pkts)
+        tx_msg_id = self.active_tx_msg_id
         if pkt_offset is not None:
             self.log('Transmiting pkt {} from msg {}'.format(pkt_offset, tx_msg_id))
             pkt_data = self.buffers[tx_msg_id][pkt_offset]
@@ -573,11 +539,9 @@ class Packetize(object):
                               tx_msg_id=tx_msg_id,
                               msg_len=app_hdr.msg_len,
                               pkt_offset=pkt_offset)
-            # clear pkt in toBtx state
-            self.toBtx[tx_msg_id] = toBtx_bitmap ^ (1<<pkt_offset)
-            # check if msg has more pkts to transmit
-            if eligible_pkts_bitmap ^ (1<<pkt_offset) != 0:
-                self.enq_active_messages_fifo(tx_msg_id)
+            # clear this pkt in the active_tx_pkts flip-flop
+            self.active_tx_pkts ^= (1<<pkt_offset)
+            # TODO: maybe we should move this state update to the creditToBtxEvent?
             # update max_tx_pkt_offset state
             if pkt_offset > self.max_tx_pkt_offset[tx_msg_id]:
                 self.max_tx_pkt_offset[tx_msg_id] = pkt_offset
@@ -730,7 +694,7 @@ class EgressPipe(object):
             # wait for a pkt from the arbiter
             (meta, pkt) = yield self.arbiter_queue.get()
             eth = Ether(dst=SWITCH_MAC, src=NIC_MAC)
-            ip = IP(dst=meta.dst_ip, src=NIC_IP)
+            ip = IP(dst=meta.dst_ip, src=NIC_IP_TX)
             if meta.is_data:
                 self.log('Processing data pkt')
                 # add Ethernet/IP/NDP headers
@@ -746,6 +710,11 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
+            # # TODO: Serialization should be accounted for in TX as well (?)
+            #         The code below breaks the priority logic in the network
+            #         at the moment
+            # delay = len(pkt)*8/Simulator.tx_link_rate
+            # yield self.env.timeout(delay)
 
 class Arbiter(object):
     """Schedule pkts between PktGen and Packetize modules into EgressPipe"""
@@ -837,7 +806,7 @@ class CPU(object):
             Simulator.message_stats['message_sizes'].append(message_size)
             # construct the message from random bytes
             payload = ''.join([chr(random.randint(97, 122)) for i in range(message_size-len(SimMessage()))])
-            msg = App(ipv4_addr=NIC_IP, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
+            msg = App(ipv4_addr=NIC_IP_RX, context_id=DST_CONTEXT, msg_len=message_size)/SimMessage(send_time=self.env.now)/payload
             # record tx msg
             Simulator.tx_msgs.append(msg[App].payload) # no App header
             # send message
@@ -898,7 +867,12 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: {}'.format(pkt[NDP].flags))
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                               pkt[IP].dst,
+                                                                                                               pkt[NDP].src_context,
+                                                                                                               pkt[NDP].dst_context,
+                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                               pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
                 if random.random() < Network.data_pkt_trim_prob:
                     self.log('Trimming data pkt')
@@ -917,7 +891,12 @@ class Network(object):
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt ({}) to IngressPipe'.format(pkt[NDP].flags))
+            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+                                                                                                                   pkt[IP].dst,
+                                                                                                                   pkt[NDP].src_context,
+                                                                                                                   pkt[NDP].dst_context,
+                                                                                                                   pkt[NDP].pkt_offset,
+                                                                                                                   pkt[NDP].flags))
             self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
@@ -942,6 +921,7 @@ class Simulator(object):
         Simulator.min_message_size = Simulator.config['min_message_size'].next()
         Simulator.max_message_size = Simulator.config['max_message_size'].next()
         Simulator.rx_link_rate = Simulator.config['rx_link_rate'].next()
+        Simulator.tx_link_rate = Simulator.config['tx_link_rate'].next()
         Simulator.rtt_pkts = Simulator.config['rtt_pkts'].next()
         Simulator.max_num_timeouts = Simulator.config['max_num_timeouts'].next()
 
@@ -984,7 +964,7 @@ class Simulator(object):
         # wire up events/externs
         self.ingress.init_getRxMsgID(self.reassemble.getRxMsgID)
         self.ingress.init_deliveredEvent(self.packetize.deliveredEvent)
-        self.ingress.init_creditEvent(self.packetize.creditEvent)
+        self.ingress.init_creditToBtxEvent(self.packetize.creditToBtxEvent)
         self.ingress.init_ctrlPktEvent(self.pktgen.ctrlPktEvent)
         self.packetize.init_scheduleTimerEvent(self.timer.scheduleTimerEvent)
         self.packetize.init_rescheduleTimerEvent(self.timer.rescheduleTimerEvent)
