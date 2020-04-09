@@ -89,6 +89,7 @@ class IngressPipe(object):
                     # TODO: No need to generate new PULL pkt if this was the
                     #       last packet of the msg
                     #       (ie, if ack_no > compute_num_pkts(msg_len))
+                    # if( ack_no + Simulator.rtt_pkts <= pkt[NDP].msg_len):
                     genPULL = True
 
                     data = (ReassembleMeta(rx_msg_id,
@@ -172,7 +173,7 @@ class EgressPipe(object):
                 pkt = eth/ip/pkt
             # send pkt into network
             self.net_queue.put(pkt)
-            # # TODO: Serialization should be accounted for in TX as well (?)
+            # # TODO: Serialization should be accounted for TX as well (?)
             #         The code below breaks the priority logic in the network
             #         at the moment
             # delay = len(pkt)*8/Simulator.tx_link_rate
