@@ -482,6 +482,7 @@ class PktGen(object):
         self.logger = Logger()
         self.arbiter_queue = arbiter_queue
         self.pacer_queue = simpy.Store(self.env)
+        self.pacer_lastTxTime = - Simulator.max_pkt_len*8/Simulator.rx_link_rate
         self.env.process(self.start_pacer())
 
     @staticmethod
@@ -519,18 +520,27 @@ class PktGen(object):
                       tx_msg_id=tx_msg_id,
                       msg_len=msg_len,
                       pkt_offset=pull_offset)
-            self.pacer_queue.put((meta, ndp))
+            # For now, assume that each PULL pkt pulls one max size pkt
+            # TODO: Pacing should be done according to the packet size of the
+            #       message that is being pulled (ie, MTU)
+            delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+            self.pacer_queue.put((meta, ndp, delay))
 
     def start_pacer(self):
         """Start pacing generated PULL pkts
         """
         while not Simulator.complete:
-            data = yield self.pacer_queue.get()
-            # For now, assume that each PULL pkt pulls one max size pkt
-            # TODO: Pacing should be done according to the packet size of the
-            #       message that is being pulled (ie, MTU)
-            delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
-            yield self.env.timeout(delay)
+            meta, pkt, delay = yield self.pacer_queue.get()
+            data = (meta, pkt)
+
+            txTime = self.pacer_lastTxTime + delay
+            now = self.env.now
+            if( now < txTime ):
+                yield self.env.timeout(txTime - now)
+                self.pacer_lastTxTime = txTime
+            else:
+                self.pacer_lastTxTime = now
+
             self.log('Pacer is releasing a PULL pkt')
             self.arbiter_queue.put(data)
 
