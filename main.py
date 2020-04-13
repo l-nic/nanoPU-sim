@@ -51,7 +51,7 @@ def run_sim(cmdline_args, *args):
             protocolModule.EgressPipe.init_params()
             Arbiter.init_params()
             CPU.init_params()
-            Network.init_params()
+            protocolModule.Network.init_params()
             Simulator.out_run_dir = os.path.join(Simulator.out_dir,
                                                  'run-{}'.format(run_cnt))
             run_cnt += 1

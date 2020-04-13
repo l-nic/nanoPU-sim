@@ -593,83 +593,6 @@ class NetworkPkt(object):
         """Highest priority element is the one with the smallest priority value"""
         return self.priority < other.priority
 
-class Network(object):
-    """The network delays each pkt. It may also drop or trim data pkts.
-    """
-    def __init__(self, rx_queue, tx_queue):
-        self.env = Simulator.env
-        self.logger = Logger()
-        # rxQueue is used to receive pkts (EgressPipe output)
-        self.rx_queue = rx_queue
-        # txQueue is where to put outgoing pkts (IngressPipe input)
-        self.tx_queue = tx_queue
-        # TOR queue
-        self.tor_queue = simpy.PriorityStore(self.env)
-
-        self.env.process(self.start_rx())
-        self.env.process(self.start_tx())
-
-    @staticmethod
-    def init_params():
-        Network.data_pkt_delay_dist = DistGenerator('data_pkt_delay')
-        Network.ctrl_pkt_delay_dist = DistGenerator('ctrl_pkt_delay')
-        Network.data_pkt_trim_prob = Simulator.config['data_pkt_trim_prob'].next()
-
-    def log(self, msg):
-        self.logger.log('Network: {}'.format(msg))
-
-    def forward_data(self, pkt):
-        delay = Network.data_pkt_delay_dist.next()
-        self.log('Forwarding data pkt with delay {}'.format(delay))
-        yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=1))
-
-    def forward_ctrl(self, pkt):
-        delay = Network.ctrl_pkt_delay_dist.next()
-        self.log('Forwarding control pkt ({}) with delay {}'.format(pkt[NDP].flags, delay))
-        yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=0))
-
-    def start_rx(self):
-        """Start receiving messages"""
-        while not Simulator.complete:
-            # Wait to receive a pkt
-            pkt = yield self.rx_queue.get()
-            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
-                                                                                                               pkt[IP].dst,
-                                                                                                               pkt[NDP].src_context,
-                                                                                                               pkt[NDP].dst_context,
-                                                                                                               pkt[NDP].pkt_offset,
-                                                                                                               pkt[NDP].flags))
-            if pkt[NDP].flags.DATA:
-                if random.random() < Network.data_pkt_trim_prob:
-                    self.log('Trimming data pkt')
-                    # trim pkt
-                    pkt[NDP].flags.CHOP = True
-                    if len(pkt) > 64:
-                        pkt = Ether(str(pkt)[0:64])
-                    self.env.process(self.forward_ctrl(pkt))
-                else:
-                    self.env.process(self.forward_data(pkt))
-            else:
-                self.env.process(self.forward_ctrl(pkt))
-
-    def start_tx(self):
-        """Start transmitting pkts from the TOR queue to the TX queue"""
-        while not Simulator.complete:
-            net_pkt = yield self.tor_queue.get()
-            pkt = net_pkt.pkt
-            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
-                                                                                                                   pkt[IP].dst,
-                                                                                                                   pkt[NDP].src_context,
-                                                                                                                   pkt[NDP].dst_context,
-                                                                                                                   pkt[NDP].pkt_offset,
-                                                                                                                   pkt[NDP].flags))
-            self.tx_queue.put(pkt)
-            # delay based on pkt length and link rate
-            delay = len(pkt)*8/Simulator.rx_link_rate
-            yield self.env.timeout(delay)
-
 class Simulator(object):
     """This class controls the simulation"""
     env = None
@@ -727,7 +650,7 @@ class Simulator(object):
         self.egress = protocolModule.EgressPipe(egress_net_queue, egress_arbiter_queue)
         self.arbiter = Arbiter(egress_arbiter_queue, pktgen_arbiter_queue, self.packetize)
         self.cpu = CPU(cpu_tx_queue, cpu_rx_queue)
-        self.network = Network(egress_net_queue, ingress_net_queue)
+        self.network = protocolModule.Network(egress_net_queue, ingress_net_queue)
 
         # wire up events/externs
         self.ingress.init_getRxMsgInfo(self.reassemble.getRxMsgInfo)
