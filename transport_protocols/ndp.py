@@ -178,3 +178,72 @@ class EgressPipe(object):
             #         at the moment
             # delay = len(pkt)*8/Simulator.tx_link_rate
             # yield self.env.timeout(delay)
+
+class PktGen(object):
+    """Generate control packets"""
+    def __init__(self, arbiter_queue):
+        self.env = Simulator.env
+        self.logger = Logger()
+        self.arbiter_queue = arbiter_queue
+        self.pacer_queue = simpy.Store(self.env)
+        self.pacer_lastTxTime = - Simulator.max_pkt_len*8/Simulator.rx_link_rate
+        self.env.process(self.start_pacer())
+
+    @staticmethod
+    def init_params():
+        pass
+
+    def log(self, msg):
+        self.logger.log('PktGen: {}'.format(msg))
+
+    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context,
+                     src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
+        self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
+        # generate control pkt
+        meta = EgressMeta(is_data=False, dst_ip=dst_ip)
+        if genACK:
+            ndp = NDP(flags="ACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
+            self.arbiter_queue.put((meta, ndp))
+        if genNACK:
+            ndp = NDP(flags="NACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
+            self.arbiter_queue.put((meta, ndp))
+        if genPULL:
+            ndp = NDP(flags="PULL",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pull_offset)
+            # For now, assume that each PULL pkt pulls one max size pkt
+            # TODO: Pacing should be done according to the packet size of the
+            #       message that is being pulled (ie, MTU)
+            delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+            self.pacer_queue.put((meta, ndp, delay))
+
+    def start_pacer(self):
+        """Start pacing generated PULL pkts
+        """
+        while not Simulator.complete:
+            meta, pkt, delay = yield self.pacer_queue.get()
+            data = (meta, pkt)
+
+            txTime = self.pacer_lastTxTime + delay
+            now = self.env.now
+            if( now < txTime ):
+                yield self.env.timeout(txTime - now)
+                self.pacer_lastTxTime = txTime
+            else:
+                self.pacer_lastTxTime = now
+
+            self.log('Pacer is releasing a PULL pkt')
+            self.arbiter_queue.put(data)

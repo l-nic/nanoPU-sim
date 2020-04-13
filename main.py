@@ -47,7 +47,7 @@ def run_sim(cmdline_args, *args):
             Reassemble.init_params()
             Packetize.init_params()
             TimerModule.init_params()
-            PktGen.init_params()
+            protocolModule.PktGen.init_params()
             protocolModule.EgressPipe.init_params()
             Arbiter.init_params()
             CPU.init_params()
