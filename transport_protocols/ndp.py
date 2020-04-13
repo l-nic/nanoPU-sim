@@ -278,7 +278,7 @@ class Network(object):
     def init_params():
         Network.data_pkt_delay_dist = DistGenerator('data_pkt_delay')
         Network.ctrl_pkt_delay_dist = DistGenerator('ctrl_pkt_delay')
-        Network.data_pkt_trim_prob = Simulator.config['data_pkt_trim_prob'].next()
+        Network.data_pkt_trim_prob = Simulator.config['data_pkt_drop_prob'].next()
 
     def log(self, msg):
         self.logger.log('Network: {}'.format(msg))
