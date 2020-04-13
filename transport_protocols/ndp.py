@@ -248,6 +248,16 @@ class PktGen(object):
             self.log('Pacer is releasing a PULL pkt')
             self.arbiter_queue.put(data)
 
+class NetworkPkt(object):
+    """A small wrapper class around scapy pkts to add priority"""
+    def __init__(self, pkt, priority):
+        self.pkt = pkt
+        self.priority = priority
+
+    def __lt__(self, other):
+        """Highest priority element is the one with the smallest priority value"""
+        return self.priority < other.priority
+
 class Network(object):
     """The network delays each pkt. It may also drop or trim data pkts.
     """

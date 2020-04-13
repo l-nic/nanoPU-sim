@@ -583,16 +583,6 @@ class CPU(object):
             delay = (message_size*8)/CPU.tx_rate # ns
             yield self.env.timeout(delay)
 
-class NetworkPkt(object):
-    """A small wrapper class around scapy pkts to add priority"""
-    def __init__(self, pkt, priority):
-        self.pkt = pkt
-        self.priority = priority
-
-    def __lt__(self, other):
-        """Highest priority element is the one with the smallest priority value"""
-        return self.priority < other.priority
-
 class Simulator(object):
     """This class controls the simulation"""
     env = None
