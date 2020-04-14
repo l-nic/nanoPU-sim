@@ -11,12 +11,15 @@ HOMA_PROTO = 0x98
 class HOMA(Packet):
     name = "HOMA"
     fields_desc = [
+        # FlagsField("incast", 0, 2, ["NO_INCAST", "INCAST"]), # This part is not specified in RAMCloud implementation
         FlagsField("op_code", 0, 8, ["ALL_DATA", "DATA", "GRANT",
                                      "LOG_TIME_TRACE", "RESEND",
                                      "BUSY", "ABORT", "BOGUS"]),
         ShortField("rpc_id", 0), # should be unique for every RPC
-        FlagsField("flags", 0, 4, ["FROM_SERVER", "FROM_CLIENT",
-                                   "RETRANSMISSION", "RESTART"]),
+        FlagsField("flags", 0, 4, ["FROM_SERVER", # Using as FROM_RECEIVER
+                                   "FROM_CLIENT", # Using as FROM_SENDER
+                                   "RETRANSMISSION",
+                                   "RESTART"]),
         ShortField("msg_len", 0),
         ShortField("pkt_offset", 0), # or should this be byte offset? Or should the header include both?
         ShortField("unscheduled_pkts", 0), # or should this be in bytes? Or should the header include both?
@@ -75,6 +78,20 @@ class IngressPipe(object):
     def init_ctrlPktEvent(self, ctrlPktEvent):
         self.ctrlPktEvent = ctrlPktEvent
 
+    def getPriority(self,msg_len):
+        if msg_len <= self.priorities[0]:
+            prio = 0
+        elif msg_len <= self.priorities[1]:
+            prio = 1
+        elif msg_len <= self.priorities[2]:
+            prio = 2
+        elif msg_len <= self.priorities[3]:
+            prio = 3
+        else:
+            prio = 4
+        # TODO: Update incoming message length distribution for future reference
+        return prio
+
     def start(self):
         """Receive and process packets from the network
         """
@@ -87,8 +104,13 @@ class IngressPipe(object):
             pkt_offset = pkt[HOMA].pkt_offset
             msg_len = pkt[HOMA].msg_len
 
-            if pkt[HOMA].op_code.DATA or pkt[HOMA].op_code.ALL_DATA:
-                self.log('Processing a data pkt')
+            if pkt[HOMA].op_code.DATA \
+               or pkt[HOMA].op_code.ALL_DATA \
+               or ( pkt[HOMA].flags.FROM_CLIENT and pkt[HOMA].op_code.RESEND ):
+
+                self.log('Processing {} - {}, pkt {}'.format(pkt[HOMA].op_code,
+                                                             pkt[HOMA].flags,
+                                                             pkt[HOMA].pkt_offset))
                 # defaults for generating control pkts
                 dst_ip = pkt[IP].src
                 rpc_id = pkt[HOMA].rpc_id
@@ -98,28 +120,17 @@ class IngressPipe(object):
                                                                           pkt[HOMA].msg_len,
                                                                           pkt[HOMA].pkt_offset)
 
-                # determine priority of this message
-                if msg_len <= self.priorities[0]:
-                    prio = 0
-                elif msg_len <= self.priorities[1]:
-                    prio = 1
-                elif msg_len <= self.priorities[2]:
-                    prio = 2
-                elif msg_len <= self.priorities[3]:
-                    prio = 3
-                else:
-                    prio = 4
-                # TODO: Update incoming message length distribution for future reference
-
                 # NOTE: ack_no is the current acknowledgement number before
                 #       processing this incoming data packet because this
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
-                if ack_no == pkt_offset:
-                    ack_no += 1
+                ack_no = ack_no + 1 if ack_no == pkt_offset else ack_no
                 # compute grant_offset
                 self.credit[rx_msg_id] = ack_no + Simulator.rtt_pkts
                 grant_offset = self.credit[rx_msg_id]
+
+                # determine priority of this message
+                prio = sef.getPriority(msg_len)
 
                 # NOTE: I am not sure if the operations below are feasible
                 #       Maybe we can define something like Read-Modify-(Delete/Write)?
@@ -141,7 +152,8 @@ class IngressPipe(object):
                         # This msg has already been fully granted, so we can
                         # unschedule it from active messages list
                         # TODO: Then how do we make sure fully granted messages
-                        #       complete in the future?
+                        #       complete in the future? Should have timers for
+                        #       every grants sent.
                         self.scheduled_msgs[prio].pop(0)
                 else:
                     self.ctrlPktEvent(genGRANT=False, genBUSY=True, dst_ip,
@@ -162,19 +174,35 @@ class IngressPipe(object):
                 self.assemble_queue.put(data)
 
             else:
-                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[HOMA].op_code, tx_msg_id, pkt[HOMA].pkt_offset))
+                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[HOMA].op_code,
+                                                                          tx_msg_id,
+                                                                          pkt[HOMA].pkt_offset))
                 # control pkt for msg being transmitted
-                if pkt[NDP].flags.ACK:
+                isInterval = True
+                ack_no = pkt_offset - Simulator.rtt_pkts
+                if pkt[HOMA].op_code.GRANT \
+                    or (pkt[HOMA].flags.FROM_SERVER and pkt[HOMA].op_code.RESEND):
                     # fire event to mark pkt as delivered
-                    self.deliveredEvent(tx_msg_id, pkt_offset, msg_len)
-                if pkt[NDP].flags.PULL or pkt[NDP].flags.NACK:
-                    # mark pkt for rtx for NACK
-                    rtx_pkt = pkt_offset if pkt[NDP].flags.NACK else None
-                    # update credit for PULL
-                    credit = pkt[NDP].pkt_offset if pkt[NDP].flags.PULL else None
-                    self.creditToBtxEvent(tx_msg_id, rtx_pkt = rtx_pkt, new_credit = credit,
-                                          opCode = 'write', compVal = credit,
+                    # NOTE: A single GRANT packet triggers 2 events
+                    # TODO: Is this possible on hardware?
+                    self.deliveredEvent(tx_msg_id, (1<<ack_no)-1,
+                                        isInterval, msg_len)
+                    self.creditToBtxEvent(tx_msg_id, rtx_pkt = None,
+                                          new_credit = pkt_offset,
+                                          opCode = 'write',
+                                          compVal = pkt_offset,
                                           relOp = operator.gt)
+
+                elif (pkt[HOMA].flags.FROM_SERVER and pkt[HOMA].op_code.BUSY):
+                    # fire event to mark pkt as delivered
+                    self.deliveredEvent(tx_msg_id, (1<<ack_no)-1,
+                                        isInterval, msg_len)
+
+                elif pkt[HOMA].flags.FROM_CLIENT and pkt[HOMA].op_code.BUSY:
+                    pass
+                    # TODO: Make sure the corresponding message is not active
+                    #       Maybe we shouldn't allow this to happen in the first
+                    #       place.
 
 class EgressPipe(object):
     """P4 programmable egress pipeline"""
