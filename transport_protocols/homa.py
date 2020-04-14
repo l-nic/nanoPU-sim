@@ -1,10 +1,30 @@
 #!/usr/bin/env python2
 
-# import simpy
+from scapy.all import *
 from nanoPU_sim import * # Note the cyclic dependency here!
 from headers import *
 from sim_utils import *
 import operator
+
+HOMA_PROTO = 0x98
+
+class HOMA(Packet):
+    name = "HOMA"
+    fields_desc = [
+        FlagsField("op_code", 0, 8, ["ALL_DATA", "DATA", "GRANT",
+                                     "LOG_TIME_TRACE", "RESEND",
+                                     "BUSY", "ABORT", "BOGUS"]),
+        ShortField("rpc_id", 0), # should be unique for every RPC
+        FlagsField("flags", 0, 4, ["FROM_SERVER", "FROM_CLIENT",
+                                   "RETRANSMISSION", "RESTART"]),
+        ShortField("msg_len", 0),
+        ShortField("pkt_offset", 0), # or should this be byte offset? Or should the header include both?
+        ShortField("unscheduled_pkts", 0), # or should this be in bytes? Or should the header include both?
+        ShortField("prio",8),
+        ShortField("tx_msg_id", 0) # originally not in Homa definition, but required for NanoTransport architecture
+    ]
+
+bind_layers(IP, HOMA, proto=HOMA_PROTO)
 
 #####
 # Programmable Elements
@@ -18,8 +38,17 @@ class IngressPipe(object):
         self.net_queue = net_queue
         self.assemble_queue = assemble_queue
 
+        # Programmer-defined state to track priority distribution
+        # Each element determines the maximum msg length that would
+        # result in the priority that is equal to the index of that element
+        # TODO: Priorities should be assigned dynamically wrt remaining msg size
+        self.priorities = [Simulator.rtt_pkts, 15, 20, 25] # Lowest priority is for unscheduled packets
+
+        # Programmer-defined state to track credit and activeness for each
+        # incoming message (Each element carries (rx_msg_id, msg_len, grant_offset))
+        self.scheduled_msgs = [[], [], [], []]
         # Programmer-defined state to track credit for each message {rx_msg_id => credit}
-        self.credit = {} #Credit is the Pull Offset in NDP
+        self.credit = {} #Credit is the Grant Offset in Homa
 
         self.env.process(self.start())
 
@@ -54,71 +83,90 @@ class IngressPipe(object):
             pkt = yield self.net_queue.get()
 
             # defaults
-            tx_msg_id = pkt[NDP].tx_msg_id
-            pkt_offset = pkt[NDP].pkt_offset
-            msg_len = pkt[NDP].msg_len
+            tx_msg_id = pkt[HOMA].tx_msg_id
+            pkt_offset = pkt[HOMA].pkt_offset
+            msg_len = pkt[HOMA].msg_len
 
-            if pkt[NDP].flags.DATA:
-                self.log('Processing data pkt')
+            if pkt[HOMA].op_code.DATA or pkt[HOMA].op_code.ALL_DATA:
+                self.log('Processing a data pkt')
                 # defaults for generating control pkts
-                genACK = False
-                genNACK = False
-                genPULL = False
                 dst_ip = pkt[IP].src
-                dst_context = pkt[NDP].src_context
-                src_context = pkt[NDP].dst_context
+                rpc_id = pkt[HOMA].rpc_id
                 rx_msg_id, ack_no, isNewMsg, isNewPkt = self.getRxMsgInfo(pkt[IP].src,
-                                                                          pkt[NDP].src_context,
-                                                                          pkt[NDP].tx_msg_id,
-                                                                          pkt[NDP].msg_len,
-                                                                          pkt[NDP].pkt_offset)
+                                                                          pkt[HOMA].rpc_id,
+                                                                          pkt[HOMA].tx_msg_id,
+                                                                          pkt[HOMA].msg_len,
+                                                                          pkt[HOMA].pkt_offset)
                 # NOTE: ack_no is the current acknowledgement number before
                 #       processing this incoming data packet because this
                 #       packet has not updated the received_bitmap in the
                 #       assembly buffer yet.
-                pull_offset_diff = 0
-                if pkt[NDP].flags.CHOP:
-                    self.log('Processing chopped data pkt')
-                    # send NACK and PULL
-                    genNACK = True
-                    genPULL = True
 
+                # determine priority of this message
+                if msg_len <= self.priorities[0]:
+                    prio = 0
+                elif msg_len <= self.priorities[1]:
+                    prio = 1
+                elif msg_len <= self.priorities[2]:
+                    prio = 2
+                elif msg_len <= self.priorities[3]:
+                    prio = 3
                 else:
-                    # process DATA pkt
-                    genACK = True
-                    # TODO: No need to generate new PULL pkt if this was the
-                    #       last packet of the msg
-                    #       (ie, if ack_no > compute_num_pkts(msg_len))
-                    # if( ack_no + Simulator.rtt_pkts <= pkt[NDP].msg_len):
-                    genPULL = True
+                    prio = 4
+                # TODO: Update incoming message length distribution for future reference
 
-                    data = (ReassembleMeta(rx_msg_id,
-                                           pkt[IP].src,
-                                           pkt[NDP].src_context,
-                                           pkt[NDP].tx_msg_id,
-                                           pkt[NDP].msg_len,
-                                           pkt[NDP].pkt_offset),
-                            pkt[NDP].payload)
-                    self.assemble_queue.put(data)
-                    pull_offset_diff = 1
-
-                # compute pull_offset with a PRAW extern
+                if ack_no == pkt_offset:
+                    grant_offset_diff = 1
+                else:
+                    grant_offset_diff = 0
+                # compute grant_offset with a PRAW atom
                 if isNewMsg:
-                    self.credit[rx_msg_id] = Simulator.rtt_pkts + pull_offset_diff
-                    pull_offset = self.credit[rx_msg_id]
+                    self.credit[rx_msg_id] = Simulator.rtt_pkts + grant_offset_diff
+                    grant_offset = self.credit[rx_msg_id]
                 else:
-                    self.credit[rx_msg_id] += pull_offset_diff
-                    pull_offset = self.credit[rx_msg_id]
+                    self.credit[rx_msg_id] += grant_offset_diff
+                    grant_offset = self.credit[rx_msg_id]
 
-                # fire event to generate control pkt(s)
-                # TODO: Instead of providing some arguments to the packet
-                #       generator, we should provide the exact transport layer
-                #       header because we want the fixed function packet generator
-                #       to be able to generate packets for any transport protocol
-                #       that programmer deploys.
-                self.ctrlPktEvent(genACK, genNACK, genPULL, dst_ip,
-                                  dst_context, src_context, tx_msg_id,
-                                  msg_len, pkt_offset, pull_offset)
+                # NOTE: I am not sure if the operations below are feasible
+                #       Maybe we can define something like Read-Modify-(Delete/Write)?
+                act_msg_id, _ = self.scheduled_msgs[prio][0]
+                if act_msg_id == None or act_msg_id == rx_msg_id:
+                    # Msg of the received pkt is the active one for this prio
+
+                    # fire event to generate control pkt(s)
+                    # TODO: Instead of providing some arguments to the packet
+                    #       generator, we should provide the exact transport layer
+                    #       header because we want the fixed function packet generator
+                    #       to be able to generate packets for any transport protocol
+                    #       that programmer deploys.
+                    self.ctrlPktEvent(genGRANT=True, genBUSY=False, dst_ip,
+                                      rpc_id, tx_msg_id, msg_len, prio,
+                                      pkt_offset, grant_offset)
+
+                    if act_msg_id != None and grant_offset > msg_len:
+                        # This msg has already been fully granted, so we can
+                        # unschedule it from active messages list
+                        # TODO: Then how do we make sure fully granted messages
+                        #       complete in the future?
+                        self.scheduled_msgs[prio].pop(0)
+                else:
+                    self.ctrlPktEvent(genGRANT=False, genBUSY=True, dst_ip,
+                                      rpc_id, tx_msg_id, msg_len, prio,
+                                      pkt_offset, grant_offset)
+
+                if (act_msg_id == None or isNewMsg) and grant_offset <= msg_len:
+                    self.scheduled_msgs[prio].append((rx_msg_id, msg_len))
+                # End of Read-Modify-(Delete/Write)
+
+                data = (ReassembleMeta(rx_msg_id,
+                                       pkt[IP].src,
+                                       pkt[HOMA].rpc_id,
+                                       pkt[HOMA].tx_msg_id,
+                                       pkt[HOMA].msg_len,
+                                       pkt[HOMA].pkt_offset),
+                        pkt[HOMA].payload)
+                self.assemble_queue.put(data)
+
             else:
                 self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags, tx_msg_id, pkt[NDP].pkt_offset))
                 # control pkt for msg being transmitted
@@ -196,39 +244,32 @@ class PktGen(object):
     def log(self, msg):
         self.logger.log('PktGen: {}'.format(msg))
 
-    def ctrlPktEvent(self, genACK, genNACK, genPULL, dst_ip, dst_context,
-                     src_context, tx_msg_id, msg_len, pkt_offset, pull_offset):
-        self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
+    def ctrlPktEvent(self, genGRANT, genBUSY, dst_ip, rpc_id, tx_msg_id,
+                           msg_len, prio, pkt_offset, grant_offset):
+        self.log('Processing ctrlPktEvent, genGRANT: {}'.format(genGRANT))
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
-        if genACK:
-            ndp = NDP(flags="ACK",
-                      src_context=src_context,
-                      dst_context=dst_context,
-                      tx_msg_id=tx_msg_id,
-                      msg_len=msg_len,
-                      pkt_offset=pkt_offset)
-            self.arbiter_queue.put((meta, ndp))
-        if genNACK:
-            ndp = NDP(flags="NACK",
-                      src_context=src_context,
-                      dst_context=dst_context,
-                      tx_msg_id=tx_msg_id,
-                      msg_len=msg_len,
-                      pkt_offset=pkt_offset)
-            self.arbiter_queue.put((meta, ndp))
-        if genPULL:
-            ndp = NDP(flags="PULL",
-                      src_context=src_context,
-                      dst_context=dst_context,
-                      tx_msg_id=tx_msg_id,
-                      msg_len=msg_len,
-                      pkt_offset=pull_offset)
-            # For now, assume that each PULL pkt pulls one max size pkt
-            # TODO: Pacing should be done according to the packet size of the
-            #       message that is being pulled (ie, MTU)
-            delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
-            self.pacer_queue.put((meta, ndp, delay))
+        if genGRANT:
+            homa = HOMA(op_code="GRANT",
+                        rpc_id=rpc_id,
+                        flags="FROM_SERVER", # TODO: Currently we don't distinguish RPC server or client
+                        msg_len=msg_len,
+                        pkt_offset=grant_offset,
+                        unscheduled_pkts=Simulator.rtt_pkts,
+                        prio=prio,
+                        tx_msg_id=tx_msg_id
+                       )
+        elif genBUSY:
+            homa = HOMA(op_code="BUSY",
+                        rpc_id=rpc_id,
+                        flags="FROM_SERVER", # TODO: Currently we don't distinguish RPC server or client
+                        msg_len=msg_len,
+                        pkt_offset=pkt_offset,
+                        unscheduled_pkts=Simulator.rtt_pkts,
+                        prio=prio,
+                        tx_msg_id=tx_msg_id
+                       )
+        self.arbiter_queue.put((meta, homa))
 
     def start_pacer(self):
         """Start pacing generated pkts (Homa doesn't use this!)
@@ -297,7 +338,7 @@ class Network(object):
                                                                pkt[HOMA].flags,
                                                                delay))
         yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=pkt[HOMA].prio))
+        self.tor_queue.put(NetworkPkt(pkt, priority=0)) # The priority value in the Homa header is to be used for data packets
 
     def start_rx(self):
         """Start receiving messages"""
