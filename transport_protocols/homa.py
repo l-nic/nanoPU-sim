@@ -278,58 +278,61 @@ class Network(object):
     def init_params():
         Network.data_pkt_delay_dist = DistGenerator('data_pkt_delay')
         Network.ctrl_pkt_delay_dist = DistGenerator('ctrl_pkt_delay')
-        Network.data_pkt_trim_prob = Simulator.config['data_pkt_trim_prob'].next()
+        Network.data_pkt_drop_prob = Simulator.config['data_pkt_drop_prob'].next()
 
     def log(self, msg):
         self.logger.log('Network: {}'.format(msg))
 
     def forward_data(self, pkt):
         delay = Network.data_pkt_delay_dist.next()
-        self.log('Forwarding data pkt with delay {}'.format(delay))
+        self.log('Forwarding {} pkt ({}) with delay {}'.format(pkt[HOMA].op_code,
+                                                               pkt[HOMA].flags,
+                                                               delay))
         yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=1))
+        self.tor_queue.put(NetworkPkt(pkt, priority=pkt[HOMA].prio))
 
     def forward_ctrl(self, pkt):
         delay = Network.ctrl_pkt_delay_dist.next()
-        self.log('Forwarding control pkt ({}) with delay {}'.format(pkt[NDP].flags, delay))
+        self.log('Forwarding {} pkt ({}) with delay {}'.format(pkt[HOMA].op_code,
+                                                               pkt[HOMA].flags,
+                                                               delay))
         yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=0))
+        self.tor_queue.put(NetworkPkt(pkt, priority=pkt[HOMA].prio))
 
     def start_rx(self):
         """Start receiving messages"""
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
+            self.log('Received pkt: src={} dst={} rpc_id={} pkt_offset={} op_code={} flags={} prio={}'.format(pkt[IP].src,
                                                                                                                pkt[IP].dst,
-                                                                                                               pkt[NDP].src_context,
-                                                                                                               pkt[NDP].dst_context,
-                                                                                                               pkt[NDP].pkt_offset,
-                                                                                                               pkt[NDP].flags))
-            if pkt[NDP].flags.DATA:
-                if random.random() < Network.data_pkt_trim_prob:
-                    self.log('Trimming data pkt')
-                    # trim pkt
-                    pkt[NDP].flags.CHOP = True
-                    if len(pkt) > 64:
-                        pkt = Ether(str(pkt)[0:64])
-                    self.env.process(self.forward_ctrl(pkt))
-                else:
-                    self.env.process(self.forward_data(pkt))
+                                                                                                               pkt[HOMA].rpc_id,
+                                                                                                               pkt[HOMA].pkt_offset,
+                                                                                                               pkt[HOMA].op_code,
+                                                                                                               pkt[HOMA].flags,
+                                                                                                               pkt[HOMA].prio))
+            # TODO: We may consider dropping packet not only randomly, but
+            #       by simulating a limited buffer capacity and overflows.
+            if random.random() < Network.data_pkt_drop_prob:
+                self.log('Dropping the pkt')
             else:
-                self.env.process(self.forward_ctrl(pkt))
+                if pkt[HOMA].opCode.DATA or pkt[HOMA].opCode.ALL_DATA:
+                    self.env.process(self.forward_data(pkt))
+                else:
+                    self.env.process(self.forward_ctrl(pkt))
 
     def start_tx(self):
         """Start transmitting pkts from the TOR queue to the TX queue"""
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
-                                                                                                                   pkt[IP].dst,
-                                                                                                                   pkt[NDP].src_context,
-                                                                                                                   pkt[NDP].dst_context,
-                                                                                                                   pkt[NDP].pkt_offset,
-                                                                                                                   pkt[NDP].flags))
+            self.log('Received pkt: src={} dst={} rpc_id={} pkt_offset={} op_code={} flags={} prio={}'.format(pkt[IP].src,
+                                                                                                               pkt[IP].dst,
+                                                                                                               pkt[HOMA].rpc_id,
+                                                                                                               pkt[HOMA].pkt_offset,
+                                                                                                               pkt[HOMA].op_code,
+                                                                                                               pkt[HOMA].flags,
+                                                                                                               pkt[HOMA].prio))
             self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
