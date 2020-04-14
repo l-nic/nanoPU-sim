@@ -139,7 +139,8 @@ class IngressPipe(object):
                 # control pkt for msg being transmitted
                 if pkt[NDP].flags.ACK:
                     # fire event to mark pkt as delivered
-                    self.deliveredEvent(tx_msg_id, pkt_offset, msg_len)
+                    isInterval = False
+                    self.deliveredEvent(tx_msg_id, pkt_offset, isInterval, msg_len)
                 if pkt[NDP].flags.PULL or pkt[NDP].flags.NACK:
                     # mark pkt for rtx for NACK
                     rtx_pkt = pkt_offset if pkt[NDP].flags.NACK else None

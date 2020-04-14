@@ -247,14 +247,23 @@ class Packetize(object):
     # Event Methods
     ####
 
-    def deliveredEvent(self, tx_msg_id, pkt_offset, msg_len):
+    def deliveredEvent(self, tx_msg_id, pkt_offset, isInterval, msg_len):
         """Mark a packet as delivered
         """
-        self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id,
-                                                                       pkt_offset))
+        if isInterval:
+            self.log("Processing deliveredEvent for msg {}, pkt bitmap {:b}".format(tx_msg_id,
+                                                                                    pkt_offset))
+        else:
+            self.log("Processing deliveredEvent for msg {}, pkt {}".format(tx_msg_id,
+                                                                           pkt_offset))
         if tx_msg_id in self.delivered:
-            self.log("Marking pkt {} as delivered".format(pkt_offset))
-            self.delivered[tx_msg_id] |= (1<<pkt_offset)
+            if isInterval:
+                self.log("Marking pkt bitmap {:b} as delivered".format(pkt_offset))
+                self.delivered[tx_msg_id] |= pkt_offset
+            else:
+                self.log("Marking pkt {} as delivered".format(pkt_offset))
+                self.delivered[tx_msg_id] |= (1<<pkt_offset)
+            
             # check if the whole message has been delivered
             num_pkts = compute_num_pkts(msg_len)
             if self.delivered[tx_msg_id] == (1<<num_pkts)-1:
