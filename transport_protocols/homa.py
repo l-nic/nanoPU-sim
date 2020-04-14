@@ -97,10 +97,6 @@ class IngressPipe(object):
                                                                           pkt[HOMA].tx_msg_id,
                                                                           pkt[HOMA].msg_len,
                                                                           pkt[HOMA].pkt_offset)
-                # NOTE: ack_no is the current acknowledgement number before
-                #       processing this incoming data packet because this
-                #       packet has not updated the received_bitmap in the
-                #       assembly buffer yet.
 
                 # determine priority of this message
                 if msg_len <= self.priorities[0]:
@@ -115,17 +111,15 @@ class IngressPipe(object):
                     prio = 4
                 # TODO: Update incoming message length distribution for future reference
 
+                # NOTE: ack_no is the current acknowledgement number before
+                #       processing this incoming data packet because this
+                #       packet has not updated the received_bitmap in the
+                #       assembly buffer yet.
                 if ack_no == pkt_offset:
-                    grant_offset_diff = 1
-                else:
-                    grant_offset_diff = 0
-                # compute grant_offset with a PRAW atom
-                if isNewMsg:
-                    self.credit[rx_msg_id] = Simulator.rtt_pkts + grant_offset_diff
-                    grant_offset = self.credit[rx_msg_id]
-                else:
-                    self.credit[rx_msg_id] += grant_offset_diff
-                    grant_offset = self.credit[rx_msg_id]
+                    ack_no += 1
+                # compute grant_offset
+                self.credit[rx_msg_id] = ack_no + Simulator.rtt_pkts
+                grant_offset = self.credit[rx_msg_id]
 
                 # NOTE: I am not sure if the operations below are feasible
                 #       Maybe we can define something like Read-Modify-(Delete/Write)?
@@ -168,7 +162,7 @@ class IngressPipe(object):
                 self.assemble_queue.put(data)
 
             else:
-                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags, tx_msg_id, pkt[NDP].pkt_offset))
+                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[HOMA].op_code, tx_msg_id, pkt[HOMA].pkt_offset))
                 # control pkt for msg being transmitted
                 if pkt[NDP].flags.ACK:
                     # fire event to mark pkt as delivered
