@@ -231,14 +231,17 @@ class EgressPipe(object):
             if meta.is_data:
                 self.log('Processing data pkt')
                 # add Ethernet/IP/NDP headers
-                pkt = eth/ip/NDP(flags="DATA",
-                                 src_context=meta.src_context,
-                                 dst_context=meta.dst_context,
-                                 tx_msg_id=meta.tx_msg_id,
-                                 msg_len=meta.msg_len,
-                                 pkt_offset=meta.pkt_offset)/pkt
+                pkt = eth/ip/HOMA(op_code="DATA",
+                                  rpc_id=meta.src_context, # TODO: Make sure CPU provides correct contect values
+                                  flags="FROM_CLIENT", # TODO: Currently we don't distinguish RPC server or client
+                                  msg_len=meta.msg_len,
+                                  pkt_offset=meta.pkt_offset,
+                                  unscheduled_pkts=Simulator.rtt_pkts,
+                                  prio=prio, # TODO: Implement getPrio()
+                                  tx_msg_id=meta.tx_msg_id)/pkt
             else:
-                self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
+                self.log('Processing control pkt: {} - {}'.format(pkt[HOMA].op_code,
+                                                                  pkt[HOMA].flags))
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
             # send pkt into network
