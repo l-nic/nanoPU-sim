@@ -231,7 +231,7 @@ class PktGen(object):
             self.pacer_queue.put((meta, ndp, delay))
 
     def start_pacer(self):
-        """Start pacing generated PULL pkts
+        """Start pacing generated pkts (Homa doesn't use this!)
         """
         while not Simulator.complete:
             meta, pkt, delay = yield self.pacer_queue.get()
@@ -245,7 +245,7 @@ class PktGen(object):
             else:
                 self.pacer_lastTxTime = now
 
-            self.log('Pacer is releasing a PULL pkt')
+            self.log('Pacer is releasing a pkt')
             self.arbiter_queue.put(data)
 
 class NetworkPkt(object):
