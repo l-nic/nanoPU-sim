@@ -213,12 +213,32 @@ class EgressPipe(object):
         self.arbiter_queue = arbiter_queue
         self.env.process(self.start())
 
+        # Programmer-defined state to track priority distribution
+        # Each element determines the maximum msg length that would
+        # result in the priority that is equal to the index of that element
+        # TODO: Priorities should be assigned dynamically wrt remaining msg size
+        self.priorities = [Simulator.rtt_pkts, 15, 20, 25] # Lowest priority is for unscheduled packets
+
     @staticmethod
     def init_params():
         pass
 
     def log(self, msg):
         self.logger.log('EgressPipe: {}'.format(msg))
+
+    def getPriority(self,msg_len):
+        if msg_len <= self.priorities[0]:
+            prio = 0
+        elif msg_len <= self.priorities[1]:
+            prio = 1
+        elif msg_len <= self.priorities[2]:
+            prio = 2
+        elif msg_len <= self.priorities[3]:
+            prio = 3
+        else:
+            prio = 4
+        # TODO: Update incoming message length distribution for future reference
+        return prio
 
     def start(self):
         """Receive and process packets
@@ -237,7 +257,7 @@ class EgressPipe(object):
                                   msg_len=meta.msg_len,
                                   pkt_offset=meta.pkt_offset,
                                   unscheduled_pkts=Simulator.rtt_pkts,
-                                  prio=prio, # TODO: Implement getPrio()
+                                  prio=sef.getPriority(meta.msg_len),
                                   tx_msg_id=meta.tx_msg_id)/pkt
             else:
                 self.log('Processing control pkt: {} - {}'.format(pkt[HOMA].op_code,
