@@ -45,7 +45,7 @@ class IngressPipe(object):
         # Each element determines the maximum msg length that would
         # result in the priority that is equal to the index of that element
         # TODO: Priorities should be assigned dynamically wrt remaining msg size
-        self.priorities = [Simulator.rtt_pkts, 15, 20, 25] # Lowest priority is for unscheduled packets
+        self.priorities = [2, 5, 7, Simulator.rtt_pkts] # Lowest priority is for scheduled packets
 
         # Programmer-defined state to track credit and activeness for each
         # incoming message (Each element carries (rx_msg_id, msg_len, grant_offset))
@@ -217,7 +217,7 @@ class EgressPipe(object):
         # Each element determines the maximum msg length that would
         # result in the priority that is equal to the index of that element
         # TODO: Priorities should be assigned dynamically wrt remaining msg size
-        self.priorities = [Simulator.rtt_pkts, 15, 20, 25] # Lowest priority is for unscheduled packets
+        self.priorities = [2, 5, 7, Simulator.rtt_pkts] # Lowest priority is for scheduled packets
 
     @staticmethod
     def init_params():
