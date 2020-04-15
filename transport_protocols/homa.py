@@ -252,7 +252,7 @@ class EgressPipe(object):
                 self.log('Processing data pkt')
                 # add Ethernet/IP/NDP headers
                 pkt = eth/ip/HOMA(op_code="DATA",
-                                  rpc_id=meta.src_context, # TODO: Make sure CPU provides correct contect values
+                                  rpc_id=meta.src_context, # TODO: Make sure CPU provides correct contect values (unique rpcId)
                                   flags="FROM_CLIENT", # TODO: Currently we don't distinguish RPC server or client
                                   msg_len=meta.msg_len,
                                   pkt_offset=meta.pkt_offset,
