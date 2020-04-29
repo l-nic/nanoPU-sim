@@ -253,6 +253,9 @@ class PktGen(object):
             meta, pkt, delay = yield self.pacer_queue.get()
             data = (meta, pkt)
 
+            # TODO: We may combine PULLs with ACKs and NACKs by moving the
+            #       logic below to ctrlPktEvent.
+            #       This would also require to recognize PULLACK and PULLNACK flags.
             txTime = self.pacer_lastTxTime + delay
             now = self.env.now
             if( now < txTime ):
