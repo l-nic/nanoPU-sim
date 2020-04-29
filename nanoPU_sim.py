@@ -263,7 +263,7 @@ class Packetize(object):
             else:
                 self.log("Marking pkt {} as delivered".format(pkt_offset))
                 self.delivered[tx_msg_id] |= (1<<pkt_offset)
-            
+
             # check if the whole message has been delivered
             num_pkts = compute_num_pkts(msg_len)
             if self.delivered[tx_msg_id] == (1<<num_pkts)-1:
@@ -347,6 +347,11 @@ class Packetize(object):
                 self.scheduled_pkts_fifo.put((tx_msg_id, rtx_pkts))
                 # increase timeout counter
                 self.timeout_count[tx_msg_id] += 1
+                # NOTE: The operation is logically required, but it seems that
+                #       it is not needed in practice because the rtx_pkts are
+                #       most probably 0 in toBtx already.
+                # # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
+                # self.toBtx[tx_msg_id] &= ~tx_pkts
 
     def init_scheduleTimerEvent(self, scheduleTimerEvent):
         self.scheduleTimerEvent = scheduleTimerEvent
@@ -388,6 +393,8 @@ class Packetize(object):
                 # schedule the first pkts of the msg for transmission
                 tx_pkts = self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1
                 self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts))
+                # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
+                self.toBtx[tx_msg_id] ^= tx_pkts
             else:
                 self.log('ERROR: dropping message due to lack of an available tx_msg_id')
 
