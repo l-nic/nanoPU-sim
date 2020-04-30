@@ -240,13 +240,13 @@ class PktGen(object):
                       msg_len=msg_len,
                       pull_offset=pull_offset)
 
-            if genACK and delay == 0:
+            if genACK:# and delay == 0:
                 # We can combine PULL and ACKs
                 ndp.flags |= "ACK"
                 ndp.pkt_offset = pkt_offset
                 genACK = False # Don't generate ACK again for this event
 
-            if genNACK and delay == 0:
+            if genNACK:# and delay == 0:
                 # We can combine PULL and NACKs
                 ndp.flags |= "NACK"
                 ndp.pkt_offset = pkt_offset
