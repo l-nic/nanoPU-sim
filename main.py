@@ -33,12 +33,10 @@ def run_sim(cmdline_args, *args):
         print("ERROR: Could not import {} pipelines.".format(protocolName))
         sys.exit()
 
-    IngressPipe = getattr(protocolModule, "IngressPipe")
     # run the simulations
     run_cnt = 0
     try:
         while True:
-            print 'Running simulation {} ...'.format(run_cnt)
             # initialize random seed
             random.seed(1)
             np.random.seed(1)
@@ -54,12 +52,14 @@ def run_sim(cmdline_args, *args):
             protocolModule.Network.init_params()
             Simulator.out_run_dir = os.path.join(Simulator.out_dir,
                                                  'run-{}'.format(run_cnt))
-            run_cnt += 1
             env = simpy.Environment()
             Simulator.env = env
             s = Simulator(protocolModule,*args)
+
+            print 'Running simulation {} ...'.format(run_cnt)
             env.run()
             s.dump_run_logs()
+            run_cnt += 1
     except StopIteration:
         print 'All Simulations Complete!'
 

@@ -1,11 +1,27 @@
 #!/usr/bin/env python2
 
-# import simpy
+from scapy.all import *
 from nanoPU_sim import * # Note the cyclic dependency here!
 from headers import *
 from sim_utils import *
 import operator
 
+NDP_PROTO = 0x99
+
+class NDP(Packet):
+    name = "NDP"
+    fields_desc = [
+        FlagsField("flags", 0, 8, ["DATA", "ACK", "NACK", "PULL",
+                                   "CHOP", "F1", "F2", "F3"]),
+        ShortField("src_context", 0),
+        ShortField("dst_context", 0),
+        ShortField("tx_msg_id", 0),
+        ShortField("msg_len", 0),
+        ShortField("pkt_offset", 0), # or should this be byte offset? Or should the header include both?
+        ShortField("pull_offset", 0)
+    ]
+
+bind_layers(IP, NDP, proto=NDP_PROTO)
 #####
 # Programmable Elements
 #####
@@ -103,6 +119,7 @@ class IngressPipe(object):
                     pull_offset_diff = 1
 
                 # compute pull_offset with a PRAW extern
+                pull_offset = 0
                 if isNewMsg:
                     self.credit[rx_msg_id] = Simulator.rtt_pkts + pull_offset_diff
                     pull_offset = self.credit[rx_msg_id]
@@ -124,12 +141,13 @@ class IngressPipe(object):
                 # control pkt for msg being transmitted
                 if pkt[NDP].flags.ACK:
                     # fire event to mark pkt as delivered
-                    self.deliveredEvent(tx_msg_id, pkt_offset, msg_len)
+                    isInterval = False
+                    self.deliveredEvent(tx_msg_id, pkt_offset, isInterval, msg_len)
                 if pkt[NDP].flags.PULL or pkt[NDP].flags.NACK:
                     # mark pkt for rtx for NACK
                     rtx_pkt = pkt_offset if pkt[NDP].flags.NACK else None
                     # update credit for PULL
-                    credit = pkt[NDP].pkt_offset if pkt[NDP].flags.PULL else None
+                    credit = pkt[NDP].pull_offset if pkt[NDP].flags.PULL else None
                     self.creditToBtxEvent(tx_msg_id, rtx_pkt = rtx_pkt, new_credit = credit,
                                           opCode = 'write', compVal = credit,
                                           relOp = operator.gt)
@@ -201,34 +219,57 @@ class PktGen(object):
         self.log('Processing ctrlPktEvent, genACK: {}, genNACK: {}, genPULL: {}'.format(genACK, genNACK, genPULL))
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
-        if genACK:
-            ndp = NDP(flags="ACK",
-                      src_context=src_context,
-                      dst_context=dst_context,
-                      tx_msg_id=tx_msg_id,
-                      msg_len=msg_len,
-                      pkt_offset=pkt_offset)
-            self.arbiter_queue.put((meta, ndp))
-        if genNACK:
-            ndp = NDP(flags="NACK",
-                      src_context=src_context,
-                      dst_context=dst_context,
-                      tx_msg_id=tx_msg_id,
-                      msg_len=msg_len,
-                      pkt_offset=pkt_offset)
-            self.arbiter_queue.put((meta, ndp))
         if genPULL:
+            # For now, assume that each PULL pkt pulls one max size pkt
+            # TODO: Pacing should be done according to the packet size of the
+            #       message that is being pulled (ie, MTU)
+            inter_packet_time = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+            txTime = self.pacer_lastTxTime + inter_packet_time
+            now = self.env.now
+            if( now < txTime ):
+                delay = txTime - now
+                self.pacer_lastTxTime = txTime
+            else:
+                delay = 0
+                self.pacer_lastTxTime = now
+
             ndp = NDP(flags="PULL",
                       src_context=src_context,
                       dst_context=dst_context,
                       tx_msg_id=tx_msg_id,
                       msg_len=msg_len,
-                      pkt_offset=pull_offset)
-            # For now, assume that each PULL pkt pulls one max size pkt
-            # TODO: Pacing should be done according to the packet size of the
-            #       message that is being pulled (ie, MTU)
-            delay = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+                      pull_offset=pull_offset)
+
+            if genACK:# and delay == 0:
+                # We can combine PULL and ACKs
+                ndp.flags |= "ACK"
+                ndp.pkt_offset = pkt_offset
+                genACK = False # Don't generate ACK again for this event
+
+            if genNACK:# and delay == 0:
+                # We can combine PULL and NACKs
+                ndp.flags |= "NACK"
+                ndp.pkt_offset = pkt_offset
+                genNACK = False # Don't generate NACK again for this event
+
             self.pacer_queue.put((meta, ndp, delay))
+
+        if genACK:
+            ndp_ack = NDP(flags="ACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
+            self.arbiter_queue.put((meta, ndp_ack))
+        if genNACK:
+            ndp_nack = NDP(flags="NACK",
+                      src_context=src_context,
+                      dst_context=dst_context,
+                      tx_msg_id=tx_msg_id,
+                      msg_len=msg_len,
+                      pkt_offset=pkt_offset)
+            self.arbiter_queue.put((meta, ndp_nack))
 
     def start_pacer(self):
         """Start pacing generated PULL pkts
@@ -237,13 +278,7 @@ class PktGen(object):
             meta, pkt, delay = yield self.pacer_queue.get()
             data = (meta, pkt)
 
-            txTime = self.pacer_lastTxTime + delay
-            now = self.env.now
-            if( now < txTime ):
-                yield self.env.timeout(txTime - now)
-                self.pacer_lastTxTime = txTime
-            else:
-                self.pacer_lastTxTime = now
+            yield self.env.timeout(delay)
 
             self.log('Pacer is releasing a PULL pkt')
             self.arbiter_queue.put(data)
@@ -278,7 +313,7 @@ class Network(object):
     def init_params():
         Network.data_pkt_delay_dist = DistGenerator('data_pkt_delay')
         Network.ctrl_pkt_delay_dist = DistGenerator('ctrl_pkt_delay')
-        Network.data_pkt_trim_prob = Simulator.config['data_pkt_trim_prob'].next()
+        Network.data_pkt_trim_prob = Simulator.config['data_pkt_drop_prob'].next()
 
     def log(self, msg):
         self.logger.log('Network: {}'.format(msg))
