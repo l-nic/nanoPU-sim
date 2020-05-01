@@ -189,13 +189,12 @@ class EgressPipe(object):
                 self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
+
+            delay = len(pkt)*8/Simulator.tx_link_rate
+            yield self.env.timeout(delay)
             # send pkt into network
             self.net_queue.put(pkt)
-            # # TODO: Serialization should be accounted for TX as well (?)
-            #         The code below breaks the priority logic in the network
-            #         at the moment
-            # delay = len(pkt)*8/Simulator.tx_link_rate
-            # yield self.env.timeout(delay)
+
 
 class PktGen(object):
     """Generate control packets"""
@@ -204,7 +203,7 @@ class PktGen(object):
         self.logger = Logger()
         self.arbiter_queue = arbiter_queue
         self.pacer_queue = simpy.Store(self.env)
-        self.pacer_lastTxTime = - Simulator.max_pkt_len*8/Simulator.rx_link_rate
+        self.pacer_lastTxTime = - (Simulator.max_pkt_len+len(Ether()/IP()/NDP()))*8/Simulator.rx_link_rate
         self.env.process(self.start_pacer())
 
     @staticmethod
@@ -220,10 +219,7 @@ class PktGen(object):
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
         if genPULL:
-            # For now, assume that each PULL pkt pulls one max size pkt
-            # TODO: Pacing should be done according to the packet size of the
-            #       message that is being pulled (ie, MTU)
-            inter_packet_time = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+            inter_packet_time = (Simulator.max_pkt_len+len(Ether()/IP()/NDP()))*8/Simulator.rx_link_rate # ns
             txTime = self.pacer_lastTxTime + inter_packet_time
             now = self.env.now
             if( now < txTime ):
