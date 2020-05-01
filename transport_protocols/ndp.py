@@ -306,6 +306,9 @@ class Network(object):
         # TOR queue
         self.tor_queue = simpy.PriorityStore(self.env)
 
+        # Count the number of DATA packets on switch
+        self.data_pkt_counter = 0
+
         self.env.process(self.start_rx())
         self.env.process(self.start_tx())
 
@@ -342,7 +345,10 @@ class Network(object):
                                                                                                                pkt[NDP].pkt_offset,
                                                                                                                pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
-                if random.random() < Network.data_pkt_trim_prob:
+                self.data_pkt_counter += 1
+                # if random.random() < Network.data_pkt_trim_prob:
+                # Istead of random drops, drop every (1 / Network.data_pkt_trim_prob)-th packet
+                if self.data_pkt_counter % (1 / Network.data_pkt_trim_prob) == 0:
                     self.log('Trimming data pkt')
                     # trim pkt
                     pkt[NDP].flags.CHOP = True
