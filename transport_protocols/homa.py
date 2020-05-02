@@ -265,8 +265,8 @@ class EgressPipe(object):
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
 
-            delay = len(pkt)*8/Simulator.tx_link_rate
-            yield self.env.timeout(delay)
+            packetization_delay = len(pkt)*8/Simulator.tx_link_rate
+            yield self.env.timeout(packetization_delay)
             # send pkt into network
             self.net_queue.put(pkt)
 
@@ -417,7 +417,8 @@ class Network(object):
                                                                                                                pkt[HOMA].op_code,
                                                                                                                pkt[HOMA].flags,
                                                                                                                pkt[HOMA].prio))
-            self.tx_queue.put(pkt)
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
             yield self.env.timeout(delay)
+
+            self.tx_queue.put(pkt)
