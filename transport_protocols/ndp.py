@@ -18,7 +18,8 @@ class NDP(Packet):
         ShortField("tx_msg_id", 0),
         ShortField("msg_len", 0),
         ShortField("pkt_offset", 0), # or should this be byte offset? Or should the header include both?
-        ShortField("pull_offset", 0)
+        ShortField("pull_offset", 0),
+        XBitField("_pad17bytes",0,17*8)
     ]
 
 bind_layers(IP, NDP, proto=NDP_PROTO)
