@@ -264,13 +264,11 @@ class EgressPipe(object):
                                                                   pkt[HOMA].flags))
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
+
+            delay = len(pkt)*8/Simulator.tx_link_rate
+            yield self.env.timeout(delay)
             # send pkt into network
             self.net_queue.put(pkt)
-            # # TODO: Serialization should be accounted for TX as well (?)
-            #         The code below breaks the priority logic in the network
-            #         at the moment
-            # delay = len(pkt)*8/Simulator.tx_link_rate
-            # yield self.env.timeout(delay)
 
 class PktGen(object):
     """Generate control packets"""
