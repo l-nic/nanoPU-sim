@@ -257,7 +257,7 @@ class PktGen(object):
                 ndp.pkt_offset = pkt_offset
                 genACK = False # Don't generate ACK again for this event
 
-            if genNACK:# and delay == 0:
+            if genNACK and delay == 0:
                 # We can combine PULL and NACKs
                 ndp.flags |= "NACK"
                 ndp.pkt_offset = pkt_offset
