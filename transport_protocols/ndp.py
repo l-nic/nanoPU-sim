@@ -145,7 +145,9 @@ class IngressPipe(object):
                                   dst_context, src_context, tx_msg_id,
                                   msg_len, pkt_offset, pull_offset)
             else:
-                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags, tx_msg_id, pkt[NDP].pkt_offset))
+                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags,
+                                                                          tx_msg_id,
+                                                                          pkt[NDP].pkt_offset if pkt[NDP].flags!="PULL" else pkt[NDP].pull_offset))
                 # control pkt for msg being transmitted
                 if pkt[NDP].flags.ACK:
                     # fire event to mark pkt as delivered
@@ -251,7 +253,7 @@ class PktGen(object):
                       msg_len=msg_len,
                       pull_offset=pull_offset)
 
-            if genACK:# and delay == 0:
+            if genACK and delay == 0:
                 # We can combine PULL and ACKs
                 ndp.flags |= "ACK"
                 ndp.pkt_offset = pkt_offset
