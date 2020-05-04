@@ -18,7 +18,8 @@ class NDP(Packet):
         ShortField("tx_msg_id", 0),
         ShortField("msg_len", 0),
         ShortField("pkt_offset", 0), # or should this be byte offset? Or should the header include both?
-        ShortField("pull_offset", 0)
+        ShortField("pull_offset", 0),
+        XBitField("_pad17bytes",0,17*8)
     ]
 
 bind_layers(IP, NDP, proto=NDP_PROTO)
@@ -68,6 +69,13 @@ class IngressPipe(object):
         while not Simulator.complete:
             # wait for a pkt from the network
             pkt = yield self.net_queue.get()
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+                                                                                                                               pkt[IP].dst,
+                                                                                                                               pkt[NDP].src_context,
+                                                                                                                               pkt[NDP].dst_context,
+                                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                                               pkt[NDP].pull_offset,
+                                                                                                                               pkt[NDP].flags))
 
             # defaults
             tx_msg_id = pkt[NDP].tx_msg_id
@@ -137,7 +145,9 @@ class IngressPipe(object):
                                   dst_context, src_context, tx_msg_id,
                                   msg_len, pkt_offset, pull_offset)
             else:
-                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags, tx_msg_id, pkt[NDP].pkt_offset))
+                self.log('Processing {} for tx_msg_id: {}, pkt {}'.format(pkt[NDP].flags,
+                                                                          tx_msg_id,
+                                                                          pkt[NDP].pkt_offset if pkt[NDP].flags!="PULL" else pkt[NDP].pull_offset))
                 # control pkt for msg being transmitted
                 if pkt[NDP].flags.ACK:
                     # fire event to mark pkt as delivered
@@ -189,13 +199,19 @@ class EgressPipe(object):
                 self.log('Processing control pkt: {}'.format(pkt[NDP].flags))
                 # add Ethernet/IP headers to control pkts
                 pkt = eth/ip/pkt
+
+            packetization_delay = len(pkt)*8/Simulator.tx_link_rate
+            yield self.env.timeout(packetization_delay)
             # send pkt into network
             self.net_queue.put(pkt)
-            # # TODO: Serialization should be accounted for TX as well (?)
-            #         The code below breaks the priority logic in the network
-            #         at the moment
-            # delay = len(pkt)*8/Simulator.tx_link_rate
-            # yield self.env.timeout(delay)
+            self.log('Transmitted pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+                                                                                                                               pkt[IP].dst,
+                                                                                                                               pkt[NDP].src_context,
+                                                                                                                               pkt[NDP].dst_context,
+                                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                                               pkt[NDP].pull_offset,
+                                                                                                                               pkt[NDP].flags))
+
 
 class PktGen(object):
     """Generate control packets"""
@@ -204,7 +220,7 @@ class PktGen(object):
         self.logger = Logger()
         self.arbiter_queue = arbiter_queue
         self.pacer_queue = simpy.Store(self.env)
-        self.pacer_lastTxTime = - Simulator.max_pkt_len*8/Simulator.rx_link_rate
+        self.pacer_lastTxTime = - (Simulator.max_pkt_len+len(Ether()/IP()/NDP()))*8/Simulator.rx_link_rate
         self.env.process(self.start_pacer())
 
     @staticmethod
@@ -220,10 +236,7 @@ class PktGen(object):
         # generate control pkt
         meta = EgressMeta(is_data=False, dst_ip=dst_ip)
         if genPULL:
-            # For now, assume that each PULL pkt pulls one max size pkt
-            # TODO: Pacing should be done according to the packet size of the
-            #       message that is being pulled (ie, MTU)
-            inter_packet_time = Simulator.max_pkt_len*8/Simulator.rx_link_rate # ns
+            inter_packet_time = (Simulator.max_pkt_len+len(Ether()/IP()/NDP()))*8/Simulator.rx_link_rate # ns
             txTime = self.pacer_lastTxTime + inter_packet_time
             now = self.env.now
             if( now < txTime ):
@@ -240,13 +253,13 @@ class PktGen(object):
                       msg_len=msg_len,
                       pull_offset=pull_offset)
 
-            if genACK:# and delay == 0:
+            if genACK and delay == 0:
                 # We can combine PULL and ACKs
                 ndp.flags |= "ACK"
                 ndp.pkt_offset = pkt_offset
                 genACK = False # Don't generate ACK again for this event
 
-            if genNACK:# and delay == 0:
+            if genNACK and delay == 0:
                 # We can combine PULL and NACKs
                 ndp.flags |= "NACK"
                 ndp.pkt_offset = pkt_offset
@@ -306,6 +319,9 @@ class Network(object):
         # TOR queue
         self.tor_queue = simpy.PriorityStore(self.env)
 
+        # Count the number of DATA packets on switch
+        self.data_pkt_counter = 0
+
         self.env.process(self.start_rx())
         self.env.process(self.start_tx())
 
@@ -335,14 +351,18 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
-                                                                                                               pkt[IP].dst,
-                                                                                                               pkt[NDP].src_context,
-                                                                                                               pkt[NDP].dst_context,
-                                                                                                               pkt[NDP].pkt_offset,
-                                                                                                               pkt[NDP].flags))
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+                                                                                                                               pkt[IP].dst,
+                                                                                                                               pkt[NDP].src_context,
+                                                                                                                               pkt[NDP].dst_context,
+                                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                                               pkt[NDP].pull_offset,
+                                                                                                                               pkt[NDP].flags))
             if pkt[NDP].flags.DATA:
-                if random.random() < Network.data_pkt_trim_prob:
+                self.data_pkt_counter += 1
+                # if random.random() < Network.data_pkt_trim_prob:
+                # Istead of random drops, drop every (1 / Network.data_pkt_trim_prob)-th packet
+                if self.data_pkt_counter % (1 / Network.data_pkt_trim_prob) == 0:
                     self.log('Trimming data pkt')
                     # trim pkt
                     pkt[NDP].flags.CHOP = True
@@ -359,13 +379,15 @@ class Network(object):
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} flags={}'.format(pkt[IP].src,
-                                                                                                                   pkt[IP].dst,
-                                                                                                                   pkt[NDP].src_context,
-                                                                                                                   pkt[NDP].dst_context,
-                                                                                                                   pkt[NDP].pkt_offset,
-                                                                                                                   pkt[NDP].flags))
-            self.tx_queue.put(pkt)
+            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+                                                                                                                               pkt[IP].dst,
+                                                                                                                               pkt[NDP].src_context,
+                                                                                                                               pkt[NDP].dst_context,
+                                                                                                                               pkt[NDP].pkt_offset,
+                                                                                                                               pkt[NDP].pull_offset,
+                                                                                                                               pkt[NDP].flags))
             # delay based on pkt length and link rate
             delay = len(pkt)*8/Simulator.rx_link_rate
             yield self.env.timeout(delay)
+
+            self.tx_queue.put(pkt)
