@@ -622,12 +622,14 @@ class Simulator(object):
         Simulator.rtt_pkts = Simulator.config['rtt_pkts'].next()
         Simulator.max_num_timeouts = Simulator.config['max_num_timeouts'].next()
 
-        # initialize message_stats
+        # initialize stats
         Simulator.message_stats = {'message_sizes':[],
                                    'completion_times':[]}
 
         Simulator.network_stats = {'time': [],
                                    'tor_queue_size':[]}
+
+        Simulator.network_pkts = []
 
         # TODO(sibanez): add more stats
 
@@ -727,3 +729,9 @@ class Simulator(object):
         # log the network stats
         df = pd.DataFrame({k: pd.Series(l) for k, l in Simulator.network_stats.items()}, dtype=float)
         write_csv(df, os.path.join(Simulator.out_run_dir, 'network_stats.csv'))
+
+        # log summary of the pkts received by the network
+        with open(os.path.join(Simulator.out_run_dir, 'network_pkts.txt'), 'w') as f:
+            for p in Simulator.network_pkts:
+                f.write('{} -- ({} bytes)\n'.format(p.summary(), len(p)))
+

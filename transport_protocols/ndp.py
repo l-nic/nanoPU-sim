@@ -21,6 +21,8 @@ class NDP(Packet):
         ShortField("pull_offset", 0),
         XBitField("_pad17bytes",0,17*8)
     ]
+    def mysummary(self):
+        return self.sprintf("flags=%flags%, msg_len=%msg_len%, pkt_offset=%pkt_offset%, pull_offset=%pull_offset%")
 
 bind_layers(IP, NDP, proto=NDP_PROTO)
 #####
@@ -358,11 +360,12 @@ class Network(object):
                                                                                                                                pkt[NDP].pkt_offset,
                                                                                                                                pkt[NDP].pull_offset,
                                                                                                                                pkt[NDP].flags))
+            Simulator.network_pkts.append(pkt)
             if pkt[NDP].flags.DATA:
                 self.data_pkt_counter += 1
                 # if random.random() < Network.data_pkt_trim_prob:
                 # Istead of random drops, drop every (1 / Network.data_pkt_trim_prob)-th packet
-                if self.data_pkt_counter % (1 / Network.data_pkt_trim_prob) == 0:
+                if Network.data_pkt_trim_prob > 0 and self.data_pkt_counter % (1 / Network.data_pkt_trim_prob) == 0:
                     self.log('Trimming data pkt')
                     # trim pkt
                     pkt[NDP].flags.CHOP = True
