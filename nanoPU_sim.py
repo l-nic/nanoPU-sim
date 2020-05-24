@@ -100,6 +100,16 @@ def find_first_one(bitmap):
     # Prevent twos complement sign issue.
     return int(math.log(bitmap & -bitmap, 2))
 
+class PrioPkt(object):
+    """A small wrapper class around scapy pkts to add priority"""
+    def __init__(self, pkt, priority):
+        self.pkt = pkt
+        self.priority = priority
+
+    def __lt__(self, other):
+        """Highest priority element is the one with the smallest priority value"""
+        return self.priority < other.priority
+
 #####
 # Architecture Elements
 #####
@@ -423,7 +433,7 @@ class Packetize(object):
             # Check if we have correct SRC_CONTEXT available
             if len(SRC_CONTEXT) <= tx_msg_id:
                 SRC_CONTEXT.append(len(SRC_CONTEXT))
-                
+
             pkt_data = self.buffers[tx_msg_id][pkt_offset]
             app_hdr = self.app_header[tx_msg_id]
             meta = EgressMeta(is_data=True,
@@ -535,14 +545,14 @@ class Arbiter(object):
             if pktgen_deq in result:
                 self.log('Scheduling control pkt')
                 data = result[pktgen_deq]
-                self.egress_queue.put(data)
+                self.egress_queue.put(PrioPkt(data, priority=0))
             else:
                 pktgen_deq.cancel()
 
             if pktize_deq in result:
                 self.log('Scheduling data pkt')
                 data = result[pktize_deq]
-                self.egress_queue.put(data)
+                self.egress_queue.put(PrioPkt(data, priority=1))
             else:
                 pktize_deq.interrupt()
 
@@ -652,7 +662,7 @@ class Simulator(object):
         cpu_rx_queue = simpy.Store(self.env)
         cpu_tx_queue = simpy.Store(self.env)
         pktgen_arbiter_queue = simpy.Store(self.env)
-        egress_arbiter_queue = simpy.Store(self.env)
+        egress_arbiter_queue = simpy.PriorityStore(self.env)
 
         # instantiate modules
         self.ingress = protocolModule.IngressPipe(ingress_net_queue, assemble_queue)

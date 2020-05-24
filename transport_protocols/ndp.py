@@ -185,7 +185,8 @@ class EgressPipe(object):
         """
         while not Simulator.complete:
             # wait for a pkt from the arbiter
-            (meta, pkt) = yield self.arbiter_queue.get()
+            data = yield self.arbiter_queue.get()
+            (meta, pkt) = data.pkt
             eth = Ether(dst=SWITCH_MAC, src=NIC_MAC)
             ip = IP(dst=meta.dst_ip, src=NIC_IP_TX)
             if meta.is_data:
@@ -298,16 +299,6 @@ class PktGen(object):
             self.log('Pacer is releasing a PULL pkt')
             self.arbiter_queue.put(data)
 
-class NetworkPkt(object):
-    """A small wrapper class around scapy pkts to add priority"""
-    def __init__(self, pkt, priority):
-        self.pkt = pkt
-        self.priority = priority
-
-    def __lt__(self, other):
-        """Highest priority element is the one with the smallest priority value"""
-        return self.priority < other.priority
-
 class Network(object):
     """The network delays each pkt. It may also drop or trim data pkts.
     """
@@ -340,13 +331,13 @@ class Network(object):
         delay = Network.data_pkt_delay_dist.next()
         self.log('Forwarding data pkt with delay {}'.format(delay))
         yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=1))
+        self.tor_queue.put(PrioPkt(pkt, priority=1))
 
     def forward_ctrl(self, pkt):
         delay = Network.ctrl_pkt_delay_dist.next()
         self.log('Forwarding control pkt ({}) with delay {}'.format(pkt[NDP].flags, delay))
         yield self.env.timeout(delay)
-        self.tor_queue.put(NetworkPkt(pkt, priority=0))
+        self.tor_queue.put(PrioPkt(pkt, priority=0))
 
     def start_rx(self):
         """Start receiving messages"""

@@ -245,7 +245,8 @@ class EgressPipe(object):
         """
         while not Simulator.complete:
             # wait for a pkt from the arbiter
-            (meta, pkt) = yield self.arbiter_queue.get()
+            data = yield self.arbiter_queue.get()
+            (meta, pkt) = data.pkt
             eth = Ether(dst=SWITCH_MAC, src=NIC_MAC)
             ip = IP(dst=meta.dst_ip, src=NIC_IP_TX)
             if meta.is_data:
