@@ -12,7 +12,7 @@ NIC_MAC = "08:11:22:33:44:08"
 NIC_IP_TX = "10.0.0.1"
 NIC_IP_RX = "10.0.0.2"
 
-SRC_CONTEXT=0
+SRC_CONTEXT=[0] # Every new message will add a new src_context to this list
 DST_CONTEXT=99
 
 ####
@@ -419,11 +419,16 @@ class Packetize(object):
         tx_msg_id = self.active_tx_msg_id
         if pkt_offset is not None:
             self.log('Transmiting pkt {} from msg {}'.format(pkt_offset, tx_msg_id))
+
+            # Check if we have correct SRC_CONTEXT available
+            if len(SRC_CONTEXT) <= tx_msg_id:
+                SRC_CONTEXT.append(len(SRC_CONTEXT))
+                
             pkt_data = self.buffers[tx_msg_id][pkt_offset]
             app_hdr = self.app_header[tx_msg_id]
             meta = EgressMeta(is_data=True,
                               dst_ip=app_hdr.ipv4_addr,
-                              src_context=SRC_CONTEXT,
+                              src_context=SRC_CONTEXT[tx_msg_id],
                               dst_context=app_hdr.context_id,
                               tx_msg_id=tx_msg_id,
                               msg_len=app_hdr.msg_len,
@@ -734,4 +739,3 @@ class Simulator(object):
         with open(os.path.join(Simulator.out_run_dir, 'network_pkts.txt'), 'w') as f:
             for p in Simulator.network_pkts:
                 f.write('{} -- ({} bytes)\n'.format(p.summary(), len(p)))
-
