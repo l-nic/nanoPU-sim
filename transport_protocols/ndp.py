@@ -253,18 +253,17 @@ class PktGen(object):
                       dst_context=dst_context,
                       tx_msg_id=tx_msg_id,
                       msg_len=msg_len,
+                      pkt_offset = pkt_offset,
                       pull_offset=pull_offset)
 
             if genACK and delay == 0:
                 # We can combine PULL and ACKs
                 ndp.flags |= "ACK"
-                ndp.pkt_offset = pkt_offset
                 genACK = False # Don't generate ACK again for this event
 
             if genNACK and delay == 0:
                 # We can combine PULL and NACKs
                 ndp.flags |= "NACK"
-                ndp.pkt_offset = pkt_offset
                 genNACK = False # Don't generate NACK again for this event
 
             self.pacer_queue.put((meta, ndp, delay))
