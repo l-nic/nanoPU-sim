@@ -7,6 +7,7 @@ import random
 from nanoPU_sim import *
 from headers import *
 from sim_utils import *
+import time
 
 # Include transport protocol directory for P4 pipelines
 sys.path.append( os.path.dirname(os.path.realpath(__file__)) + \
@@ -57,7 +58,20 @@ def run_sim(cmdline_args, *args):
             s = Simulator(protocolModule,*args)
 
             print 'Running simulation {} ...'.format(run_cnt)
+
+            tic = time.time()
             env.run()
+            toc = time.time() - tic
+
+            print('\nCompleted simulation {}'.format(run_cnt))
+            print(" - Trasnport Protocol:\t{}".format(protocolName))
+            print(" - Number of messages:\t{}".format(Simulator.num_messages))
+            print(" - Message size (pkt):\t{}".format(Simulator.config['message_size_value'].next()\
+                                                    / Simulator.max_pkt_len))
+            print(" - Packet size :\t{}".format(Simulator.max_pkt_len))
+            print(" - RTT Packets :\t{}".format(Simulator.rtt_pkts))
+            print("Time to complete simulation: {} sec\n".format(toc))
+
             s.dump_run_logs()
             run_cnt += 1
     except StopIteration:
