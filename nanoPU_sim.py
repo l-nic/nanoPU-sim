@@ -423,7 +423,7 @@ class Packetize(object):
             # Check if we have correct SRC_CONTEXT available
             if len(SRC_CONTEXT) <= tx_msg_id:
                 SRC_CONTEXT.append(len(SRC_CONTEXT))
-                
+
             pkt_data = self.buffers[tx_msg_id][pkt_offset]
             app_hdr = self.app_header[tx_msg_id]
             meta = EgressMeta(is_data=True,
@@ -493,7 +493,10 @@ class TimerModule(object):
             self.log('Timer cancelled for msg {}'.format(tx_msg_id))
 
     def cancelTimerEvent(self, tx_msg_id):
-        self.timer_events[tx_msg_id].interrupt('Timer Cancelled!')
+        try:
+            self.timer_events[tx_msg_id].interrupt('Timer Cancelled!')
+        except: 
+            self.log("Trying to cancel timer for msg {} which doesn't exist".format(tx_msg_id))
 
 class EgressMeta:
     def __init__(self, is_data, dst_ip, src_context=0, dst_context=0, tx_msg_id=0, msg_len=0, pkt_offset=0):

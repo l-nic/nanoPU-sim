@@ -352,7 +352,7 @@ class Network(object):
         while not Simulator.complete:
             # Wait to receive a pkt
             pkt = yield self.rx_queue.get()
-            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+            self.log('Received pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset={} flags={}'.format(pkt[IP].src,
                                                                                                                                pkt[IP].dst,
                                                                                                                                pkt[NDP].src_context,
                                                                                                                                pkt[NDP].dst_context,
@@ -381,7 +381,7 @@ class Network(object):
         while not Simulator.complete:
             net_pkt = yield self.tor_queue.get()
             pkt = net_pkt.pkt
-            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset= {} flags={}'.format(pkt[IP].src,
+            self.log('Transmitting pkt: src={} dst={} src_context={} dst_context={} pkt_offset={} pull_offset={} flags={}'.format(pkt[IP].src,
                                                                                                                                pkt[IP].dst,
                                                                                                                                pkt[NDP].src_context,
                                                                                                                                pkt[NDP].dst_context,

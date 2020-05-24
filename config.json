@@ -1,10 +1,10 @@
 {
   "out_dir": "out",
   "transport_protocol": "ndp",
-  "num_messages": 1,
+  "num_messages": 4,
   "message_size": "fixed",
-  "message_size_value": 1100,
-  "rtt_pkts": 5,
+  "message_size_value": 2000,
+  "rtt_pkts": 10,
   "data_pkt_drop_prob": [0.25],
   "max_pkt_len": 100,
   "min_message_size": 10,
