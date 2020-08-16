@@ -490,12 +490,13 @@ class TimerModule(object):
             self.timeoutEvent(tx_msg_id, self.timer_meta[tx_msg_id])
             self.log('Timeout occured for msg {}'.format(tx_msg_id))
         except simpy.Interrupt as i:
-            self.log('Timer cancelled for msg {}'.format(tx_msg_id))
+            self.log('Timer cancelled for msg {} inside invokeTimeoutEvent'.format(tx_msg_id))
 
     def cancelTimerEvent(self, tx_msg_id):
         try:
             self.timer_events[tx_msg_id].interrupt('Timer Cancelled!')
-        except: 
+            self.log('Timer cancelled for msg {}'.format(tx_msg_id))
+        except:
             self.log("Trying to cancel timer for msg {} which doesn't exist".format(tx_msg_id))
 
 class EgressMeta:
