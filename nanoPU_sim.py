@@ -215,6 +215,7 @@ class Packetize(object):
         # freelist of tx msg ids
         self.tx_msg_id_freelist = [i for i in range(Packetize.max_messages)]
         # FIFO queue of pkts to TX
+        # TODO: this should become a priority queue for Homa
         self.scheduled_pkts_fifo = simpy.Store(self.env)
         # Flip flop state to track msg and pkts currently being transmitted
         self.active_tx_msg_id = 0
@@ -281,7 +282,7 @@ class Packetize(object):
 
     # NOTE: credit state update is implemented as a PRAW atom.
     #       https://github.com/NetFPGA/P4-NetFPGA-public/wiki/PRAW-Extern-Function
-    def creditToBtxEvent(self, tx_msg_id, rtx_pkt = None, new_credit = None,
+    def creditToBtxEvent(self, tx_msg_id, meta, rtx_pkt = None, new_credit = None,
                          opCode = None, compVal = None, relOp = None):
         self.log('Processing creditToBtxEvent for tx_msg_id {}'.format(tx_msg_id))
         # Read-Modify-Write to update toBtx state variable
@@ -318,7 +319,7 @@ class Packetize(object):
             tx_pkts = self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1
             if tx_pkts != 0:
                 # schedule the pkts for transmission
-                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts))
+                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts, meta))
                 # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
                 self.toBtx[tx_msg_id] ^= tx_pkts
 
@@ -344,7 +345,8 @@ class Packetize(object):
             self.rescheduleTimerEvent(tx_msg_id, self.max_tx_pkt_offset[tx_msg_id])
             if rtx_pkts != 0:
                 # schedule the pkts for transmission
-                self.scheduled_pkts_fifo.put((tx_msg_id, rtx_pkts))
+                meta = 0 # TODO: what should this (priority) be for Homa?
+                self.scheduled_pkts_fifo.put((tx_msg_id, rtx_pkts, meta))
                 # increase timeout counter
                 self.timeout_count[tx_msg_id] += 1
                 # NOTE: The operation is logically required, but it seems that
@@ -392,7 +394,8 @@ class Packetize(object):
                 self.scheduleTimerEvent(tx_msg_id, 0)
                 # schedule the first pkts of the msg for transmission
                 tx_pkts = self.toBtx[tx_msg_id] & (1<<self.credit[tx_msg_id])-1
-                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts))
+                meta = 0 # priority will be assigned in the egress pipe for unscheduled pkts
+                self.scheduled_pkts_fifo.put((tx_msg_id, tx_pkts, meta))
                 # mark scheduled pkts as no longer needing transmission (clear bits in toBtx)
                 self.toBtx[tx_msg_id] ^= tx_pkts
             else:
@@ -407,9 +410,10 @@ class Packetize(object):
             wait_scheduled_pkts_event = self.scheduled_pkts_fifo.get()
             try:
                 # wait for pkts to be scheduled
-                (tx_msg_id, tx_pkts) = yield wait_scheduled_pkts_event
+                (tx_msg_id, tx_pkts, meta) = yield wait_scheduled_pkts_event
                 self.active_tx_msg_id = tx_msg_id
                 self.active_tx_pkts = tx_pkts
+                self.active_meta = meta
             except simpy.Interrupt as i:
                 wait_scheduled_pkts_event.cancel()
                 self.env.exit(None)
@@ -427,6 +431,7 @@ class Packetize(object):
             pkt_data = self.buffers[tx_msg_id][pkt_offset]
             app_hdr = self.app_header[tx_msg_id]
             meta = EgressMeta(is_data=True,
+                              custom=self.active_meta,
                               dst_ip=app_hdr.ipv4_addr,
                               src_context=SRC_CONTEXT[tx_msg_id],
                               dst_context=app_hdr.context_id,
@@ -500,8 +505,9 @@ class TimerModule(object):
             self.log("Trying to cancel timer for msg {} which doesn't exist".format(tx_msg_id))
 
 class EgressMeta:
-    def __init__(self, is_data, dst_ip, src_context=0, dst_context=0, tx_msg_id=0, msg_len=0, pkt_offset=0):
+    def __init__(self, is_data, custom, dst_ip, src_context=0, dst_context=0, tx_msg_id=0, msg_len=0, pkt_offset=0):
         self.is_data = is_data
+        self.custom = custom
         self.dst_ip = dst_ip
         self.src_context = src_context
         self.dst_context = dst_context
